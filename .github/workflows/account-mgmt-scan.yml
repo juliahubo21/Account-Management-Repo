@@ -83,7 +83,7 @@ jobs:
 
       - name: Run daily scan
         if: env.SKIP != '1'
-        timeout-minutes: 10
+        timeout-minutes: 25
         env:
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
           CLAUDE_CODE_OAUTH_TOKEN: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
@@ -95,7 +95,7 @@ jobs:
             || { echo "::error::Auth sanity check failed — OAuth token rejected, or network blocked"; exit 1; }
           echo ""
           echo "=== Running full scan with --debug ==="
-          timeout 480 claude \
+          timeout 1200 claude \
             --print \
             --debug \
             --strict-mcp-config \
