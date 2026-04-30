@@ -100,7 +100,7 @@ jobs:
             --debug \
             --strict-mcp-config \
             --mcp-config .mcp.json \
-            --permission-mode acceptEdits \
+            --dangerously-skip-permissions \
             --allowed-tools "mcp__affinity-mcp__*,Bash(date:*),Bash(curl:*),Bash(jq:*),Bash(echo:*),Bash(printf:*)" \
             < prompts/daily-scan.md
 
