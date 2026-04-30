@@ -97,7 +97,7 @@ jobs:
             --permission-mode acceptEdits \
             --mcp-config .mcp.json \
             --allowed-tools "mcp__affinity-mcp__*,mcp__slack__*,Bash(date:*)" \
-            "$(cat prompts/daily-scan.md)"
+            < prompts/daily-scan.md
 
       - name: Cleanup rendered .mcp.json
         if: always()
