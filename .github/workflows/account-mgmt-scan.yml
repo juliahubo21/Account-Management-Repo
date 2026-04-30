@@ -54,7 +54,7 @@ jobs:
         if: env.SKIP != '1'
         run: npm install -g @anthropic-ai/claude-code
 
-      - name: Derive Slack team ID from bot token
+      - name: Verify Slack bot token
         if: env.SKIP != '1'
         env:
           SLACK_BOT_TOKEN: ${{ secrets.SLACK_BOT_TOKEN }}
@@ -67,15 +67,12 @@ jobs:
             echo "::error::Slack auth.test failed: $ERR"
             exit 1
           fi
-          TEAM_ID=$(echo "$AUTH" | jq -r .team_id)
-          echo "SLACK_TEAM_ID=$TEAM_ID" >> "$GITHUB_ENV"
-          echo "Slack team resolved: $(echo "$AUTH" | jq -r .team) ($TEAM_ID)"
+          echo "Slack auth ok: team $(echo "$AUTH" | jq -r .team), bot $(echo "$AUTH" | jq -r .user)"
 
       - name: Render .mcp.json from template
         if: env.SKIP != '1'
         env:
           AFFINITY_API_KEY: ${{ secrets.AFFINITY_API_KEY }}
-          SLACK_BOT_TOKEN: ${{ secrets.SLACK_BOT_TOKEN }}
         run: |
           envsubst < .mcp.json.tmpl > .mcp.json
           # Sanity check: tokens must have been substituted.
@@ -90,6 +87,8 @@ jobs:
         env:
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
           CLAUDE_CODE_OAUTH_TOKEN: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          SLACK_BOT_TOKEN: ${{ secrets.SLACK_BOT_TOKEN }}
+          SLACK_CHANNEL_NAME: account-management
         run: |
           echo "=== Sanity check: claude auth, no MCP ==="
           timeout 60 claude --print "Reply with only the word ok" \
@@ -102,7 +101,7 @@ jobs:
             --strict-mcp-config \
             --mcp-config .mcp.json \
             --permission-mode acceptEdits \
-            --allowed-tools "mcp__affinity-mcp__*,mcp__slack__*,Bash(date:*)" \
+            --allowed-tools "mcp__affinity-mcp__*,Bash(date:*),Bash(curl:*),Bash(jq:*),Bash(echo:*),Bash(printf:*)" \
             < prompts/daily-scan.md
 
       - name: Cleanup rendered .mcp.json
