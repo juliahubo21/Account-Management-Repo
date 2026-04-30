@@ -1,0 +1,2 @@
+# Rendered at runtime in CI from .mcp.json.tmpl + secrets — never commit.
+.mcp.json
