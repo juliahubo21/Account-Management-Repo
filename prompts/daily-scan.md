@@ -51,6 +51,27 @@ curl -sS -X POST \
 
 After every Slack call, check `.ok` in the JSON response. If `false`, log the `.error` field to stderr and continue (don't crash the whole run).
 
+## Affinity REST API access (for emails)
+
+The Affinity MCP exposes meetings and notes but not emails. To pull email exchanges, call Affinity's V1 REST API directly via `curl`. Auth is HTTP Basic with the API key in env var `AFFINITY_API_KEY` as the password (empty username):
+
+**List emails for a given account (organization)** — replace `$ORG_ID` with the company's Affinity ID:
+```bash
+curl -sS -X GET \
+  -u ":$AFFINITY_API_KEY" \
+  "https://api.affinity.co/emails?organization_id=$ORG_ID&page_size=100"
+```
+
+The response is a JSON array of email objects. The exact field names may vary by API version. Look for these or close equivalents in each object:
+- `id` — integer email ID (use this in the dedup key as `email:<id>`)
+- `subject` — email subject line (string)
+- `sent_at` or `date` or `timestamp` — ISO 8601 timestamp (UTC)
+- `persons` or `participants` or `from` + `to` + `cc` — array(s) of person objects with `first_name`, `last_name`, `emails` (or a `name` and `email` field directly)
+
+**If the response shape differs from what's described above** — for example, an HTTP error, a wrapped envelope like `{"emails": [...]}`, missing fields, or unexpected pagination — log the unexpected response to stderr (`[email-fetch] unexpected shape for org $ORG_ID: <first 500 chars>`) and **skip emails for that account on this run**. Do not guess or fabricate participant data.
+
+If pagination is needed (response contains `next_page_token` or similar), fetch additional pages with `&page_token=...` until exhausted, but cap at 5 pages per account to avoid unbounded loops.
+
 ## Procedure
 
 ### 1. Compute the time window
@@ -67,7 +88,7 @@ If not found, post a single error message to Slack ("Account Management Master l
 
 Use the **List channels** curl to get the channel ID. Use the **Read recent channel history** curl to fetch the last 200 messages.
 
-For each message text, look for a line matching the pattern `<!-- key: meeting:<id> -->` or `<!-- key: note:<id> -->`. Extract every such key into a set called `ALREADY_POSTED`.
+For each message text, look for a line matching the pattern `<!-- key: meeting:<id> -->`, `<!-- key: note:<id> -->`, or `<!-- key: email:<id> -->`. Extract every such key into a set called `ALREADY_POSTED`.
 
 Messages without a `<!-- key: ... -->` line are either human posts or older-format messages — ignore them for dedup purposes.
 
@@ -75,15 +96,25 @@ Messages without a `<!-- key: ... -->` line are either human posts or older-form
 
 Call `mcp__affinity-mcp__get_list_entries` for the list ID. Each entry corresponds to a tracked account.
 
-For each account entry, get the underlying company ID and call:
-- `mcp__affinity-mcp__get_meetings_for_entity` — meetings linked to this company
-- `mcp__affinity-mcp__get_notes_for_entity` — notes linked to this company (Affinity logs email exchanges as notes)
+For each account entry, get the underlying company ID. Three sources of interactions to fetch per company:
 
-Filter to items whose date/time falls inside the 21-day window. Drop anything outside.
+- `mcp__affinity-mcp__get_meetings_for_entity` — meetings linked to this company
+- `mcp__affinity-mcp__get_notes_for_entity` — notes linked to this company (manual notes only — emails are NOT fetched here)
+- **Affinity REST API `/emails`** (see "Affinity REST API access" section above) — email exchanges. Pass the company's Affinity ID as `organization_id`.
+
+Combine all three sources into a single working list of interactions for this account. Tag each with its source type (`meeting` / `note` / `email`) since that determines the dedup key prefix and the message template.
+
+Filter to items whose date/time falls **inside the 21-day window**. For meetings the timestamp is the meeting start time. For notes use the note creation time. For emails use the `sent_at` (or equivalent) field. Drop anything outside the window.
 
 ### 5. Extract participants verbatim and classify by email domain
 
-For each meeting or note, take the participant array from the Affinity API response **as-is**. For every participant:
+For each interaction (meeting, note, or email), take the participant array from the source response **as-is**. The shape varies by source:
+
+- **Meetings** — participant array on the meeting object from `get_meetings_for_entity`.
+- **Notes** — author + any tagged people on the note from `get_notes_for_entity`.
+- **Emails** — combined `from` + `to` + `cc` (or the `persons` / `participants` array, depending on the response shape). Build a single deduplicated list of `{name, email}` pairs from whichever fields the response provides.
+
+For every participant from any source:
 
 - If `name` or `email` is missing/null/empty → **drop this participant** (do not call any other tool to fill it in).
 - Otherwise, lowercase the part of the email after `@` to get the `domain`.
@@ -92,7 +123,7 @@ Classification (deterministic, no judgment calls):
 - `domain == "motivepartners.com"` → **Motive**
 - everything else → **Account-side** (external)
 
-A meeting/note is **relevant** if and only if:
+An interaction is **relevant** if and only if:
 - At least one Motive participant survives the above, AND
 - At least one Account-side participant survives the above.
 
@@ -100,9 +131,10 @@ If either side is empty after filtering, **skip the entire interaction**. Do not
 
 ### 6. Dedup against ALREADY_POSTED
 
-Build the dedup key:
+Build the dedup key based on source type:
 - Meeting → `meeting:<affinity_meeting_id>`
 - Note → `note:<affinity_note_id>`
+- Email → `email:<affinity_email_id>`
 
 If the key is in `ALREADY_POSTED`, skip. Otherwise it's new.
 
@@ -152,7 +184,7 @@ Participants:
 <!-- key: meeting:<MEETING_ID> -->
 ```
 
-**Template — emails / notes** (emit literally, with the leading 📧 emoji):
+**Template — emails / notes** (emit literally, with the leading 📧 emoji). The dedup key prefix depends on source — `note:<id>` for notes, `email:<id>` for emails:
 
 ```
 📧 New Email: <https://motivepartners.affinity.co/companies/COMPANY_ID|ACCOUNT_NAME>
@@ -161,8 +193,10 @@ Subject: <VERBATIM_SUBJECT>
 Participants:
  • Motive Partners: <COMMA_SEPARATED_MOTIVE_NAMES>
  • <ACCOUNT_NAME>: <COMMA_SEPARATED_ACCOUNT_NAMES>
-<!-- key: note:<NOTE_ID> -->
+<!-- key: <SOURCE_PREFIX>:<INTERACTION_ID> -->
 ```
+
+Where `<SOURCE_PREFIX>` is `note` for an Affinity note or `email` for an email fetched via the REST API.
 
 **Concrete example** of a correctly-formatted meeting message body — produce output that looks exactly like this in shape, styling, and field order:
 
