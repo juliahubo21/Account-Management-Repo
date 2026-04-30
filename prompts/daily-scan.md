@@ -141,28 +141,54 @@ This is non-negotiable. Better to skip than to post a wrong name.
 
 ### 9. Post each new item to Slack
 
-Use the **Post a message** curl above. The visible `$TEXT` body uses Slack `mrkdwn`:
+Build the visible message body using **EXACTLY** the template below. Substitute only the placeholders. Do NOT reword, reorder, combine fields, add lines, or add headers. The format is rigid for a reason — downstream readers expect this exact shape.
 
-For meetings:
-```
-📅 *New Meeting:* <https://motivepartners.affinity.co/companies/COMPANY_ID|ACCOUNT_NAME>
-*Date:* Friday 1st May 2026 at 3:00 PM EDT
-*Subject:* <verbatim subject from Affinity>
-*Participants:*
- • Motive Partners: <comma-separated verbatim names>
- • <ACCOUNT_NAME>: <comma-separated verbatim names>
-```
+**Template — meetings** (emit literally, with the leading 📅 emoji and a single space):
 
-For email/note interactions, change the first line:
 ```
-📧 *New Email:* <https://motivepartners.affinity.co/companies/COMPANY_ID|ACCOUNT_NAME>
+📅 New Meeting: <https://motivepartners.affinity.co/companies/COMPANY_ID|ACCOUNT_NAME>
+Date: <NY_FORMATTED_DATE>
+Subject: <VERBATIM_SUBJECT>
+Participants:
+ • Motive Partners: <COMMA_SEPARATED_MOTIVE_NAMES>
+ • <ACCOUNT_NAME>: <COMMA_SEPARATED_ACCOUNT_NAMES>
 ```
 
-Then everything else is the same.
+**Template — emails / notes** (emit literally, with the leading 📧 emoji):
 
-`$DEDUP_KEY` for the metadata field is `meeting:<id>` or `note:<id>`.
+```
+📧 New Email: <https://motivepartners.affinity.co/companies/COMPANY_ID|ACCOUNT_NAME>
+Date: <NY_FORMATTED_DATE>
+Subject: <VERBATIM_SUBJECT>
+Participants:
+ • Motive Partners: <COMMA_SEPARATED_MOTIVE_NAMES>
+ • <ACCOUNT_NAME>: <COMMA_SEPARATED_ACCOUNT_NAMES>
+```
 
-The dedup key MUST go into the `metadata` field — never into the visible text. Users see only the formatted message; the metadata is invisible to them but readable to future runs.
+**Concrete example** of a correctly-formatted meeting message body — produce output that looks exactly like this in shape, styling, and field order:
+
+```
+📅 New Meeting: <https://motivepartners.affinity.co/companies/130573966|St. James's Place Wealth Management>
+Date: Tuesday 12th May 2026 at 9:00 AM EDT
+Subject: SJP / Motive catch-up
+Participants:
+ • Motive Partners: Mike Campbell, Ramin Niroumand
+ • St. James's Place Wealth Management: Tucker York
+```
+
+**Strict DO-NOT rules:**
+
+- Do NOT use bold, italics, or any other markdown styling on the labels (no `*Date:*`, no `_Subject_`). Labels are plain text followed by a colon and a space.
+- Do NOT replace `Motive Partners:` with `Motive:` or any other shortening — always the full string `Motive Partners:`.
+- Do NOT add an extra header line like `<account> — upcoming meeting` or `Account: <name>` above or below the template.
+- Do NOT combine Motive and account participants onto a single line. They are always two separate bullet lines, in this order (Motive first, account second), even if one side has only one person.
+- Do NOT use any bullet character other than `•` (Unicode U+2022). Each bullet line begins with one leading space, then `•`, then one space, then the content.
+- Do NOT include any line that isn't in the template — no signoff, no explanation, no `<!-- ... -->` comment, no key marker.
+- Do NOT include the dedup key in the visible text. The dedup key goes ONLY into the `metadata` field of the Post a message curl call.
+
+The `<https://...|NAME>` syntax is Slack mrkdwn for a hyperlink — Slack renders the visible part (`NAME`) as clickable text linking to the URL. Use it exactly as shown.
+
+`$DEDUP_KEY` for the metadata field is `meeting:<id>` for meetings or `note:<id>` for notes.
 
 ### 10. If nothing new
 
