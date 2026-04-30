@@ -33,24 +33,19 @@ curl -sS -X GET -H "Authorization: Bearer $SLACK_BOT_TOKEN" \
   | jq -r ".channels[] | select(.name == \"$SLACK_CHANNEL_NAME\") | .id"
 ```
 
-**Read recent channel history** (with metadata, for dedup; replace `$CHANNEL_ID`):
+**Read recent channel history** (for dedup; replace `$CHANNEL_ID`):
 ```bash
 curl -sS -X GET -H "Authorization: Bearer $SLACK_BOT_TOKEN" \
-  "https://slack.com/api/conversations.history?channel=$CHANNEL_ID&limit=200&include_all_metadata=true" \
-  | jq -r '.messages[] | select(.metadata.event_type == "interaction_dedup") | .metadata.event_payload.key'
+  "https://slack.com/api/conversations.history?channel=$CHANNEL_ID&limit=200" \
+  | jq -r ".messages[].text"
 ```
 
-**Post a message** (with hidden dedup metadata; replace `$CHANNEL_ID`, `$TEXT`, `$DEDUP_KEY`):
+**Post a message** (replace `$CHANNEL_ID` and `$TEXT`; the dedup marker is the LAST line of `$TEXT`, see template in step 9):
 ```bash
 curl -sS -X POST \
   -H "Authorization: Bearer $SLACK_BOT_TOKEN" \
   -H "Content-Type: application/json; charset=utf-8" \
-  --data "$(jq -nc \
-    --arg ch "$CHANNEL_ID" \
-    --arg t "$TEXT" \
-    --arg key "$DEDUP_KEY" \
-    '{channel:$ch, text:$t, mrkdwn:true,
-      metadata:{event_type:"interaction_dedup", event_payload:{key:$key}}}')" \
+  --data "$(jq -nc --arg ch "$CHANNEL_ID" --arg t "$TEXT" '{channel:$ch, text:$t, mrkdwn:true}')" \
   https://slack.com/api/chat.postMessage
 ```
 
@@ -70,9 +65,11 @@ If not found, post a single error message to Slack ("Account Management Master l
 
 ### 3. Resolve the Slack channel and load dedup keys
 
-Use the **List channels** curl to get the channel ID. Use the **Read recent channel history** curl to fetch the last 200 messages **with metadata**. The jq line above already extracts `metadata.event_payload.key` — collect those into a set called `ALREADY_POSTED`.
+Use the **List channels** curl to get the channel ID. Use the **Read recent channel history** curl to fetch the last 200 messages.
 
-If a message has no `metadata.event_type == "interaction_dedup"`, ignore it (it's an old message from a prior format, or a human post — neither participates in dedup).
+For each message text, look for a line matching the pattern `<!-- key: meeting:<id> -->` or `<!-- key: note:<id> -->`. Extract every such key into a set called `ALREADY_POSTED`.
+
+Messages without a `<!-- key: ... -->` line are either human posts or older-format messages — ignore them for dedup purposes.
 
 ### 4. Iterate accounts in the list
 
@@ -141,28 +138,56 @@ This is non-negotiable. Better to skip than to post a wrong name.
 
 ### 9. Post each new item to Slack
 
-Use the **Post a message** curl above. The visible `$TEXT` body uses Slack `mrkdwn`:
+Build the visible message body using **EXACTLY** the template below. Substitute only the placeholders. Do NOT reword, reorder, combine fields, add lines, or add headers. The format is rigid for a reason — downstream readers expect this exact shape.
 
-For meetings:
-```
-📅 *New Meeting:* <https://motivepartners.affinity.co/companies/COMPANY_ID|ACCOUNT_NAME>
-*Date:* Friday 1st May 2026 at 3:00 PM EDT
-*Subject:* <verbatim subject from Affinity>
-*Participants:*
- • Motive Partners: <comma-separated verbatim names>
- • <ACCOUNT_NAME>: <comma-separated verbatim names>
-```
+**Template — meetings** (emit literally, with the leading 📅 emoji and a single space):
 
-For email/note interactions, change the first line:
 ```
-📧 *New Email:* <https://motivepartners.affinity.co/companies/COMPANY_ID|ACCOUNT_NAME>
+📅 New Meeting: <https://motivepartners.affinity.co/companies/COMPANY_ID|ACCOUNT_NAME>
+Date: <NY_FORMATTED_DATE>
+Subject: <VERBATIM_SUBJECT>
+Participants:
+ • Motive Partners: <COMMA_SEPARATED_MOTIVE_NAMES>
+ • <ACCOUNT_NAME>: <COMMA_SEPARATED_ACCOUNT_NAMES>
+<!-- key: meeting:<MEETING_ID> -->
 ```
 
-Then everything else is the same.
+**Template — emails / notes** (emit literally, with the leading 📧 emoji):
 
-`$DEDUP_KEY` for the metadata field is `meeting:<id>` or `note:<id>`.
+```
+📧 New Email: <https://motivepartners.affinity.co/companies/COMPANY_ID|ACCOUNT_NAME>
+Date: <NY_FORMATTED_DATE>
+Subject: <VERBATIM_SUBJECT>
+Participants:
+ • Motive Partners: <COMMA_SEPARATED_MOTIVE_NAMES>
+ • <ACCOUNT_NAME>: <COMMA_SEPARATED_ACCOUNT_NAMES>
+<!-- key: note:<NOTE_ID> -->
+```
 
-The dedup key MUST go into the `metadata` field — never into the visible text. Users see only the formatted message; the metadata is invisible to them but readable to future runs.
+**Concrete example** of a correctly-formatted meeting message body — produce output that looks exactly like this in shape, styling, and field order:
+
+```
+📅 New Meeting: <https://motivepartners.affinity.co/companies/130573966|St. James's Place Wealth Management>
+Date: Tuesday 12th May 2026 at 9:00 AM EDT
+Subject: SJP / Motive catch-up
+Participants:
+ • Motive Partners: Mike Campbell, Ramin Niroumand
+ • St. James's Place Wealth Management: Tucker York
+<!-- key: meeting:6823177053 -->
+```
+
+**Strict DO-NOT rules:**
+
+- Do NOT use bold, italics, or any other markdown styling on the labels (no `*Date:*`, no `_Subject_`). Labels are plain text followed by a colon and a space.
+- Do NOT replace `Motive Partners:` with `Motive:` or any other shortening — always the full string `Motive Partners:`.
+- Do NOT add an extra header line like `<account> — upcoming meeting` or `Account: <name>` above or below the template.
+- Do NOT combine Motive and account participants onto a single line. They are always two separate bullet lines, in this order (Motive first, account second), even if one side has only one person.
+- Do NOT use any bullet character other than `•` (Unicode U+2022). Each bullet line begins with one leading space, then `•`, then one space, then the content.
+- Do NOT add any line that isn't in the template (no signoff, no explanation). The trailing `<!-- key: ... -->` line IS part of the template and IS required — it's how the next run dedups this item.
+
+The `<https://...|NAME>` syntax is Slack mrkdwn for a hyperlink — Slack renders the visible part (`NAME`) as clickable text linking to the URL. Use it exactly as shown.
+
+The trailing `<!-- key: ... -->` line is mandatory. Use `meeting:<id>` for meetings or `note:<id>` for notes (where `<id>` is the integer ID returned by Affinity for that meeting/note).
 
 ### 10. If nothing new
 
