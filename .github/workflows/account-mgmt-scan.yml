@@ -69,6 +69,34 @@ jobs:
           fi
           echo "Slack auth ok: team $(echo "$AUTH" | jq -r .team), bot $(echo "$AUTH" | jq -r .user)"
 
+      - name: Verify Affinity REST API
+        if: env.SKIP != '1'
+        env:
+          AFFINITY_API_KEY: ${{ secrets.AFFINITY_API_KEY }}
+        run: |
+          echo "AFFINITY_API_KEY length: ${#AFFINITY_API_KEY}"
+          echo "Proxy env vars (none expected on standard GH runners):"
+          env | grep -iE '^(http_proxy|https_proxy|no_proxy)=' || echo "  (none set)"
+          echo "Curl version:"
+          curl --version | head -1
+          echo "Hitting GET /auth/whoami to verify auth..."
+          HTTP_CODE=$(curl -sS -o /tmp/affinity_whoami.json -w "%{http_code}" \
+            -u ":$AFFINITY_API_KEY" \
+            "https://api.affinity.co/auth/whoami") || {
+            echo "::error::curl exit code $? against api.affinity.co — network/proxy issue"
+            exit 1
+          }
+          if [ "$HTTP_CODE" != "200" ]; then
+            echo "::error::Affinity /auth/whoami returned HTTP $HTTP_CODE"
+            cat /tmp/affinity_whoami.json
+            exit 1
+          fi
+          echo "Affinity auth ok: $(jq -r '.firstName + " " + .lastName' /tmp/affinity_whoami.json) ($(jq -r .emailAddress /tmp/affinity_whoami.json))"
+          echo "Now testing /interactions?type=3 (emails endpoint)..."
+          curl -sS -i -u ":$AFFINITY_API_KEY" \
+            "https://api.affinity.co/interactions?type=3&page_size=1" \
+            -m 15 | head -20
+
       - name: Render .mcp.json from template
         if: env.SKIP != '1'
         env:
