@@ -115,7 +115,7 @@ For each new item, post a separate message via the **Post a message** curl above
 
 Notes:
 - Replace `New Meeting / Email:` with `New Meeting:` for meetings and `New Email:` for notes/emails — pick whichever fits.
-- `AFFINITY_ACCOUNT_URL` should be the Affinity URL for the company. If `get_company_info` returns a `url` or similar field, use it. Otherwise leave the URL field blank and just write the account name plain.
+- `AFFINITY_ACCOUNT_URL` is constructed from the company's Affinity ID using this exact template: `https://motivepartners.affinity.co/companies/<COMPANY_ID>`. The company ID is the integer ID returned by Affinity when you fetched the list entry / company. Always include this URL — never leave it blank.
 - The trailing `<!-- key: ... -->` line is **mandatory** — without it, the next run cannot dedup this item and will repost it.
 - Render times in the meeting's local timezone if available, otherwise UTC.
 
