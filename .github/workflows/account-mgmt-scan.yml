@@ -86,16 +86,22 @@ jobs:
 
       - name: Run daily scan
         if: env.SKIP != '1'
+        timeout-minutes: 10
         env:
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
-          # If you'd rather use an OAuth token, set CLAUDE_CODE_OAUTH_TOKEN secret
-          # instead and remove ANTHROPIC_API_KEY above. Claude Code picks up either.
           CLAUDE_CODE_OAUTH_TOKEN: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
         run: |
-          claude \
+          echo "=== Sanity check: claude auth, no MCP ==="
+          timeout 60 claude --print "Reply with only the word ok" \
+            || { echo "::error::Auth sanity check failed — OAuth token rejected, or network blocked"; exit 1; }
+          echo ""
+          echo "=== Running full scan with --debug ==="
+          timeout 480 claude \
             --print \
-            --permission-mode acceptEdits \
+            --debug \
+            --strict-mcp-config \
             --mcp-config .mcp.json \
+            --permission-mode acceptEdits \
             --allowed-tools "mcp__affinity-mcp__*,mcp__slack__*,Bash(date:*)" \
             < prompts/daily-scan.md
 
