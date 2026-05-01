@@ -44,6 +44,9 @@ NY_TZ = ZoneInfo("America/New_York")
 AFFINITY_KEY = os.environ["AFFINITY_API_KEY"]
 SLACK_TOKEN = os.environ["SLACK_BOT_TOKEN"]
 CHANNEL_NAME = os.environ["SLACK_CHANNEL_NAME"]
+# Optional: skip channel listing entirely if the ID is already known. Useful
+# for private channels where the bot doesn't have groups:read scope.
+CHANNEL_ID_OVERRIDE = os.environ.get("SLACK_CHANNEL_ID") or None
 
 aff = requests.Session()
 aff.auth = ("", AFFINITY_KEY)
@@ -345,11 +348,17 @@ def main():
         return 1
     log(f"Affinity list '{LIST_NAME}' id={list_id}")
 
-    channel_id = find_channel_id(CHANNEL_NAME)
-    if not channel_id:
-        warn(f"Slack channel '{CHANNEL_NAME}' not found")
-        return 1
-    log(f"Slack channel '{CHANNEL_NAME}' id={channel_id}")
+    if CHANNEL_ID_OVERRIDE:
+        channel_id = CHANNEL_ID_OVERRIDE
+        log(f"Slack channel '{CHANNEL_NAME}' id={channel_id} (from SLACK_CHANNEL_ID env)")
+    else:
+        channel_id = find_channel_id(CHANNEL_NAME)
+        if not channel_id:
+            warn(f"Slack channel '{CHANNEL_NAME}' not found via conversations.list "
+                 f"— set SLACK_CHANNEL_ID env to the channel ID to skip listing "
+                 f"(needed for private channels without groups:read scope)")
+            return 1
+        log(f"Slack channel '{CHANNEL_NAME}' id={channel_id}")
 
     already = load_already_posted(channel_id)
     log(f"Already posted (from last {SLACK_HISTORY_LIMIT} channel messages): {len(already)} keys")
