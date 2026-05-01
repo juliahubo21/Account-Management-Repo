@@ -77,4 +77,7 @@ jobs:
           AFFINITY_API_KEY: ${{ secrets.AFFINITY_API_KEY }}
           SLACK_BOT_TOKEN: ${{ secrets.SLACK_BOT_TOKEN }}
           SLACK_CHANNEL_NAME: account-management
+          # Optional: set SLACK_CHANNEL_ID secret to skip conversations.list
+          # (needed for private channels without groups:read scope).
+          SLACK_CHANNEL_ID: ${{ secrets.SLACK_CHANNEL_ID }}
         run: python scripts/scan.py
