@@ -6,7 +6,7 @@ Posts a single succinct Slack message every Friday.
 
 Sections:
   PAST INTERACTIONS     last 7 days, meetings only
-  UPCOMING INTERACTIONS next 14 days, meetings only
+  UPCOMING INTERACTIONS next 7 days, meetings only
   NO INTERACTIONS       accounts with nothing in either window, grouped by owner
 
 Env vars:
@@ -32,7 +32,7 @@ AFFINITY_URL  = "https://motivepartners.affinity.co"
 MOTIVE_DOMAIN = "motivepartners.com"
 ROOM_ALIASES  = {"nyreception@motivepartners.com"}
 PAST_DAYS     = 7
-UPCOMING_DAYS = 14
+UPCOMING_DAYS = 7
 NY_TZ         = ZoneInfo("America/New_York")
 DIVIDER       = "─" * 26
 MAX_TITLE     = 80
@@ -433,14 +433,14 @@ def build_message(
     past_range = fmt_range(past_start, past_end - timedelta(seconds=1))
     lines.append(f"\U0001f4cb *PAST INTERACTIONS ({past_range})*")
     lines.append("")
-    lines += build_section(past_groups, "_No meetings this week._")
+    lines += build_section(past_groups, "_No meetings in the last 7 days._")
 
     # Upcoming
     lines.append(DIVIDER)
     upc_range = fmt_range(today_utc, upc_end)
     lines.append(f"\U0001f4c5 *UPCOMING INTERACTIONS ({upc_range})*")
     lines.append("")
-    lines += build_section(upcoming_groups, "_No upcoming meetings in the next 2 weeks._")
+    lines += build_section(upcoming_groups, "_No meetings scheduled in the next 7 days._")
 
     # No interactions
     lines.append(DIVIDER)
