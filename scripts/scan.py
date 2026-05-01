@@ -149,17 +149,35 @@ def find_channel_id(name):
 
 
 KEY_RE = re.compile(r"<!--\s*key:\s*(meeting|note|email):(\d+)\s*-->")
+KEY_LINE_RE = re.compile(r"\n?<!--\s*key:[^>]*-->\s*$")
+
+
+def text_body_key(text):
+    """Stable identity for a Slack message's visible body, ignoring the
+    trailing <!-- key: ... --> marker. Used to dedup messages whose Affinity
+    IDs differ but whose visible content is identical."""
+    return KEY_LINE_RE.sub("", text).strip()
 
 
 def load_already_posted(channel_id):
+    """Returns (already_keys, already_bodies):
+       - already_keys: set of "<type>:<id>" strings parsed from <!-- key: ... -->
+       - already_bodies: set of visible-text-bodies (sans key line) for textual
+         dedup against prior messages.
+    """
     data = slk_get("conversations.history", channel=channel_id, limit=SLACK_HISTORY_LIMIT)
     if not data:
-        return set()
-    keys = set()
+        return set(), set()
+    keys, bodies = set(), set()
     for msg in data.get("messages", []):
-        for m in KEY_RE.finditer(msg.get("text", "")):
+        text = msg.get("text", "")
+        for m in KEY_RE.finditer(text):
             keys.add(f"{m.group(1)}:{m.group(2)}")
-    return keys
+        # Only consider scanner-posted messages for body dedup (they have a key
+        # marker). Human chatter shouldn't influence our dedup decisions.
+        if KEY_RE.search(text):
+            bodies.add(text_body_key(text))
+    return keys, bodies
 
 
 def parse_iso(s):
@@ -481,15 +499,18 @@ def main():
             return 1
         log(f"Slack channel '{CHANNEL_NAME}' id={channel_id}")
 
-    already = load_already_posted(channel_id)
-    log(f"Already posted (from last {SLACK_HISTORY_LIMIT} channel messages): {len(already)} keys")
+    already_keys, already_bodies = load_already_posted(channel_id)
+    log(f"Already posted (from last {SLACK_HISTORY_LIMIT} channel messages): "
+        f"{len(already_keys)} keys, {len(already_bodies)} body texts")
 
     entries = get_list_entries(list_id)
     log(f"List entries: {len(entries)}")
 
-    posted_this_run = set()
+    posted_keys_this_run = set()
+    posted_bodies_this_run = set()
     posted_count = 0
-    skipped_dedup = 0
+    skipped_dedup_key = 0
+    skipped_dedup_body = 0
     skipped_nopair = 0
     error_count = 0
 
@@ -516,8 +537,8 @@ def main():
 
         for item in items:
             key = f"{item['type']}:{item['id']}"
-            if key in already or key in posted_this_run:
-                skipped_dedup += 1
+            if key in already_keys or key in posted_keys_this_run:
+                skipped_dedup_key += 1
                 continue
             motive, account = split_participants(item["raw_persons"])
             if not motive or not account:
@@ -526,6 +547,12 @@ def main():
             item["motive"] = motive
             item["account"] = account
             text = build_message(item, account_name, org_id)
+            body = text_body_key(text)
+            if body in already_bodies or body in posted_bodies_this_run:
+                skipped_dedup_body += 1
+                log(f"skipped {key} → {account_name} :: identical body to a "
+                    f"previously-posted message")
+                continue
             res = slk_post("chat.postMessage", {
                 "channel": channel_id,
                 "text": text,
@@ -533,14 +560,16 @@ def main():
             })
             if res:
                 posted_count += 1
-                posted_this_run.add(key)
+                posted_keys_this_run.add(key)
+                posted_bodies_this_run.add(body)
                 log(f"posted {key} → {account_name} :: {item['subject'][:60]}")
             else:
                 error_count += 1
 
     log("--- summary ---")
     log(f"posted: {posted_count}")
-    log(f"skipped (already in slack history): {skipped_dedup}")
+    log(f"skipped (key already in slack history): {skipped_dedup_key}")
+    log(f"skipped (identical body to existing message): {skipped_dedup_body}")
     log(f"skipped (no Motive↔account participant pair): {skipped_nopair}")
     log(f"errors: {error_count}")
     return 0 if error_count == 0 else 2
