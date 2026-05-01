@@ -296,11 +296,40 @@ def fetch_interactions(org_id, type_int, win_start, win_end):
     return extract_list(data, f"/interactions type={type_int} org={org_id}")
 
 
+DATE_FIELDS = ("start_time", "startTime", "date", "sent_at", "sentAt",
+               "timestamp", "occurred_at", "occurredAt", "scheduled_for",
+               "scheduledFor", "created_at", "createdAt")
+
+
+def first_iso(item):
+    """Find the first parseable ISO timestamp across known field names."""
+    for f in DATE_FIELDS:
+        v = item.get(f) if isinstance(item, dict) else None
+        if v:
+            dt = parse_iso(v)
+            if dt:
+                return dt
+    return None
+
+
+_logged_shape_for = set()
+
+
+def log_first_item_shape(label, items):
+    """One-time per-label log of the first item's top-level keys for diagnostics."""
+    if label in _logged_shape_for or not items:
+        return
+    if isinstance(items[0], dict):
+        log(f"[shape] {label} item keys: {sorted(items[0].keys())[:30]}")
+    _logged_shape_for.add(label)
+
+
 def fetch_meetings(org_id, win_start, win_end):
     items = fetch_interactions(org_id, 0, win_start, win_end)
+    log_first_item_shape("meetings", items)
     out = []
     for m in items:
-        start = parse_iso(m.get("start_time") or m.get("date"))
+        start = first_iso(m)
         if not start:
             continue
         out.append({
@@ -312,6 +341,8 @@ def fetch_meetings(org_id, win_start, win_end):
                 m.get("attendees")
                 or m.get("participants")
                 or m.get("persons")
+                or m.get("attendee_persons")
+                or m.get("attendeePersons")
                 or []
             ),
         })
@@ -320,9 +351,10 @@ def fetch_meetings(org_id, win_start, win_end):
 
 def fetch_emails(org_id, win_start, win_end):
     items = fetch_interactions(org_id, 3, win_start, win_end)
+    log_first_item_shape("emails", items)
     out = []
     for e in items:
-        sent = parse_iso(e.get("date") or e.get("sent_at") or e.get("timestamp"))
+        sent = first_iso(e)
         if not sent:
             continue
         raw = []
@@ -346,9 +378,10 @@ def fetch_notes(org_id, win_start, win_end):
     """V2 /v2/companies/{id}/notes endpoint. Filters by createdAt client-side."""
     data = aff_get(f"/v2/companies/{org_id}/notes")
     items = extract_list(data, f"/v2/companies/{org_id}/notes")
+    log_first_item_shape("notes", items)
     out = []
     for n in items:
-        created = parse_iso(n.get("createdAt") or n.get("created_at"))
+        created = first_iso(n)
         if not created or not (win_start <= created <= win_end):
             continue
         raw = []
