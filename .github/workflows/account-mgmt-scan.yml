@@ -15,7 +15,7 @@ concurrency:
 jobs:
   scan:
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 15
     steps:
       - name: Gate to 10:00 America/New_York
         # Both crons fire daily; only proceed when local NY hour is 10.
@@ -32,27 +32,15 @@ jobs:
         if: env.SKIP != '1'
         uses: actions/checkout@v4
 
-      - name: Set up Node
-        if: env.SKIP != '1'
-        uses: actions/setup-node@v4
-        with:
-          node-version: '22'
-
-      - name: Set up Python (for uvx / Affinity MCP)
+      - name: Set up Python
         if: env.SKIP != '1'
         uses: actions/setup-python@v5
         with:
           python-version: '3.12'
 
-      - name: Install uv (provides uvx)
+      - name: Install Python dependencies
         if: env.SKIP != '1'
-        run: |
-          curl -LsSf https://astral.sh/uv/install.sh | sh
-          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
-
-      - name: Install Claude Code CLI
-        if: env.SKIP != '1'
-        run: npm install -g @anthropic-ai/claude-code
+        run: pip install -r requirements.txt
 
       - name: Verify Slack bot token
         if: env.SKIP != '1'
@@ -74,65 +62,19 @@ jobs:
         env:
           AFFINITY_API_KEY: ${{ secrets.AFFINITY_API_KEY }}
         run: |
-          echo "AFFINITY_API_KEY length: ${#AFFINITY_API_KEY}"
-          echo "Proxy env vars (none expected on standard GH runners):"
-          env | grep -iE '^(http_proxy|https_proxy|no_proxy)=' || echo "  (none set)"
-          echo "Curl version:"
-          curl --version | head -1
-          echo "Hitting GET /auth/whoami to verify auth..."
-          HTTP_CODE=$(curl -sS -o /tmp/affinity_whoami.json -w "%{http_code}" \
-            -u ":$AFFINITY_API_KEY" \
-            "https://api.affinity.co/auth/whoami") || {
-            echo "::error::curl exit code $? against api.affinity.co — network/proxy issue"
-            exit 1
-          }
+          HTTP_CODE=$(curl -sS -o /tmp/whoami.json -w "%{http_code}" \
+            -u ":$AFFINITY_API_KEY" "https://api.affinity.co/auth/whoami")
           if [ "$HTTP_CODE" != "200" ]; then
             echo "::error::Affinity /auth/whoami returned HTTP $HTTP_CODE"
-            cat /tmp/affinity_whoami.json
+            cat /tmp/whoami.json
             exit 1
           fi
-          echo "Affinity auth ok: $(jq -r '.firstName + " " + .lastName' /tmp/affinity_whoami.json) ($(jq -r .emailAddress /tmp/affinity_whoami.json))"
-          echo "Now testing /interactions?type=3 (emails endpoint)..."
-          curl -sS -i -u ":$AFFINITY_API_KEY" \
-            "https://api.affinity.co/interactions?type=3&page_size=1" \
-            -m 15 | head -20
-
-      - name: Render .mcp.json from template
-        if: env.SKIP != '1'
-        env:
-          AFFINITY_API_KEY: ${{ secrets.AFFINITY_API_KEY }}
-        run: |
-          envsubst < .mcp.json.tmpl > .mcp.json
-          # Sanity check: tokens must have been substituted.
-          if grep -q '\${' .mcp.json; then
-            echo "::error::.mcp.json still has unsubstituted variables — secret missing?"
-            exit 1
-          fi
+          echo "Affinity auth ok"
 
       - name: Run daily scan
         if: env.SKIP != '1'
-        timeout-minutes: 25
         env:
-          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
-          CLAUDE_CODE_OAUTH_TOKEN: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          AFFINITY_API_KEY: ${{ secrets.AFFINITY_API_KEY }}
           SLACK_BOT_TOKEN: ${{ secrets.SLACK_BOT_TOKEN }}
           SLACK_CHANNEL_NAME: account-management
-          AFFINITY_API_KEY: ${{ secrets.AFFINITY_API_KEY }}
-        run: |
-          echo "=== Sanity check: claude auth, no MCP ==="
-          timeout 60 claude --print "Reply with only the word ok" \
-            || { echo "::error::Auth sanity check failed — OAuth token rejected, or network blocked"; exit 1; }
-          echo ""
-          echo "=== Running full scan with --debug ==="
-          timeout 1200 claude \
-            --print \
-            --debug \
-            --strict-mcp-config \
-            --mcp-config .mcp.json \
-            --dangerously-skip-permissions \
-            --allowed-tools "mcp__affinity-mcp__*,Bash(date:*),Bash(curl:*),Bash(jq:*),Bash(echo:*),Bash(printf:*)" \
-            < prompts/daily-scan.md
-
-      - name: Cleanup rendered .mcp.json
-        if: always()
-        run: rm -f .mcp.json
+        run: python scripts/scan.py
