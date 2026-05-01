@@ -152,18 +152,41 @@ KEY_RE = re.compile(r"<!--\s*key:\s*(meeting|note|email):(\d+)\s*-->")
 KEY_LINE_RE = re.compile(r"\n?<!--\s*key:[^>]*-->\s*$")
 
 
+def normalize_for_dedup(text):
+    """Normalize a Slack message text for comparison.
+
+    Slack rewrites text on the wire / on storage in ways that differ from what
+    we send. Specifically:
+    - Emoji are replaced by their shortcode form (📧 → :e-mail:, 📅 → :date:).
+    - User-supplied '<' and '>' are HTML-escaped (&lt; / &gt;) — including
+      our <!-- key: ... --> marker. Slack-recognised <URL|label> link syntax
+      is NOT escaped, so we don't need to round-trip those.
+
+    Map both directions to the same canonical form so dedup against history
+    works regardless of which side a piece of text came from.
+    """
+    return (
+        text
+        .replace("📧", ":e-mail:")
+        .replace("📅", ":date:")
+        .replace("&lt;", "<")
+        .replace("&gt;", ">")
+        .replace("&amp;", "&")
+    ).strip()
+
+
 def text_body_key(text):
     """Stable identity for a Slack message's visible body, ignoring the
     trailing <!-- key: ... --> marker. Used to dedup messages whose Affinity
     IDs differ but whose visible content is identical."""
-    return KEY_LINE_RE.sub("", text).strip()
+    return KEY_LINE_RE.sub("", normalize_for_dedup(text)).strip()
 
 
 def load_already_posted(channel_id):
     """Returns (already_keys, already_bodies):
        - already_keys: set of "<type>:<id>" strings parsed from <!-- key: ... -->
-       - already_bodies: set of visible-text-bodies (sans key line) for textual
-         dedup against prior messages.
+       - already_bodies: set of normalized visible-text-bodies (sans key line)
+         for textual dedup against prior messages.
     """
     data = slk_get("conversations.history", channel=channel_id, limit=SLACK_HISTORY_LIMIT)
     if not data:
@@ -171,19 +194,18 @@ def load_already_posted(channel_id):
     msgs = data.get("messages", [])
     log(f"[history] conversations.history returned {len(msgs)} messages")
     if msgs:
-        # Preview the first scanner-shaped message (or just the first one) so
-        # we can see whether Slack escapes our <!-- key: ... --> markers.
         sample_text = msgs[0].get("text", "")
         log(f"[history] first message text (first 400 chars): "
             f"{sample_text[:400]!r}")
     keys, bodies = set(), set()
     for msg in msgs:
         text = msg.get("text", "")
-        for m in KEY_RE.finditer(text):
+        # Normalize first so the regex matches whether Slack stored the marker
+        # raw or HTML-escaped.
+        normalized = normalize_for_dedup(text)
+        for m in KEY_RE.finditer(normalized):
             keys.add(f"{m.group(1)}:{m.group(2)}")
-        # Only consider scanner-posted messages for body dedup (they have a key
-        # marker). Human chatter shouldn't influence our dedup decisions.
-        if KEY_RE.search(text):
+        if KEY_RE.search(normalized):
             bodies.add(text_body_key(text))
     return keys, bodies
 
