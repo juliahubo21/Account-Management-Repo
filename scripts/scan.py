@@ -168,8 +168,16 @@ def load_already_posted(channel_id):
     data = slk_get("conversations.history", channel=channel_id, limit=SLACK_HISTORY_LIMIT)
     if not data:
         return set(), set()
+    msgs = data.get("messages", [])
+    log(f"[history] conversations.history returned {len(msgs)} messages")
+    if msgs:
+        # Preview the first scanner-shaped message (or just the first one) so
+        # we can see whether Slack escapes our <!-- key: ... --> markers.
+        sample_text = msgs[0].get("text", "")
+        log(f"[history] first message text (first 400 chars): "
+            f"{sample_text[:400]!r}")
     keys, bodies = set(), set()
-    for msg in data.get("messages", []):
+    for msg in msgs:
         text = msg.get("text", "")
         for m in KEY_RE.finditer(text):
             keys.add(f"{m.group(1)}:{m.group(2)}")
