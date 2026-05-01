@@ -2,12 +2,13 @@
 """
 Account Management weekly summary.
 
-Posts a single succinct Slack message every Friday.
+Posts THREE Slack messages every Friday, each prefixed with the same header:
+  1. PAST INTERACTIONS         (last 7 days, meetings only)
+  2. UPCOMING INTERACTIONS     (next 7 days, meetings only)
+  3. NO INTERACTIONS           (accounts with nothing in either window)
 
-Sections:
-  PAST INTERACTIONS     last 7 days, meetings only
-  UPCOMING INTERACTIONS next 7 days, meetings only
-  NO INTERACTIONS       accounts with nothing in either window, grouped by owner
+If any single section exceeds the Slack display threshold, it is split into
+multiple messages at company-block boundaries (never mid-company).
 
 Env vars:
     AFFINITY_API_KEY      Affinity REST API key (V1)
@@ -36,8 +37,11 @@ UPCOMING_DAYS = 7
 NY_TZ         = ZoneInfo("America/New_York")
 DIVIDER       = "─" * 26
 MAX_TITLE     = 80
-MAX_EXT_NAMES = 5  # show first N external names, then "(+ M more)"
+MAX_EXT_NAMES = 5
 OWNERS_FIELD_FALLBACK = 5617247
+# Slack splits messages over ~4000 chars in the UI; use a safe threshold
+# below that and split at clean boundaries to avoid mid-company cuts.
+SLACK_MSG_LIMIT = 3500
 
 AFFINITY_KEY        = os.environ["AFFINITY_API_KEY"]
 SLACK_TOKEN         = os.environ["SLACK_BOT_TOKEN"]
@@ -55,7 +59,6 @@ slk = requests.Session()
 slk.headers["Authorization"] = f"Bearer {SLACK_TOKEN}"
 
 
-# ── Logging ───────────────────────────────────────────────────────────────────
 def log(msg):  print(msg, flush=True)
 def warn(msg): print(f"[warn] {msg}", file=sys.stderr, flush=True)
 
@@ -81,7 +84,6 @@ LIST_KEYS = (
 
 
 def unpack(data, label=""):
-    """Pull a list out of a heterogeneous Affinity response."""
     if data is None: return []
     if isinstance(data, list): return data
     if isinstance(data, dict):
@@ -145,7 +147,6 @@ def find_channel_id(name):
 
 # ── Slack mrkdwn formatting ────────────────────────────────────────────────────
 def slk_escape(text):
-    """Escape characters Slack treats specially in mrkdwn link labels."""
     return (text or "").replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
 
 
@@ -218,8 +219,6 @@ def get_person_name(person_id):
 
 
 def get_owners_for_entry(entry_id, owners_field_id):
-    """V1 /field-values requires exactly one of person_id/organization_id/
-    opportunity_id/list_entry_id — we use list_entry_id and filter client-side."""
     if not entry_id or not owners_field_id:
         return []
     if entry_id in _owners_cache:
@@ -283,7 +282,6 @@ def normalize_persons(raw):
 
 
 def split_attendees(raw_persons):
-    """([motive_names], [external_names]) deduplicated by email."""
     motive, external, seen = [], [], set()
     for p in normalize_persons(raw_persons):
         key = p["email"] or p["name"]
@@ -344,7 +342,6 @@ def fetch_meetings(org_id, start, end):
     return out
 
 
-# Dedupe meetings by (date, normalized title) within a company
 _PREFIX = re.compile(r"^(re|fw|fwd):\s*", re.I)
 
 
@@ -353,7 +350,6 @@ def norm_title(t):
 
 
 def dedupe_meetings(items):
-    """Keep one meeting per (date, normalized title), preferring earliest dt."""
     seen = {}
     for item in items:
         key = (ny_date(item["dt"]), norm_title(item["title"]))
@@ -403,60 +399,75 @@ def render_bullet(item):
     return f"• _{title}_ — {m_str}"
 
 
-def build_section(groups, empty_msg):
-    """groups: [(co_name, co_id, date_obj, [items])]"""
-    lines = []
+# ── Chunk builders ───────────────────────────────────────────────────────────
+def build_company_chunks(groups):
+    """Each chunk = one company's full block (header line + bullets), no trailing newline."""
+    chunks = []
     for co_name, co_id, d, items in sorted(groups, key=lambda x: (x[2], x[0])):
         bullets = [b for b in (render_bullet(i) for i in items) if b]
         if not bullets: continue
-        lines.append(f"{co_link_bold(co_name, co_id)} · {fmt_month_day(d)}")
-        lines.extend(bullets)
-        lines.append("")
-    if not lines:
-        lines.append(empty_msg)
-        lines.append("")
-    return lines
+        chunk = f"{co_link_bold(co_name, co_id)} · {fmt_month_day(d)}\n" + "\n".join(bullets)
+        chunks.append(chunk)
+    return chunks
 
 
-def build_message(
-    past_groups, upcoming_groups, no_interaction,
-    past_start, past_end, today_utc, upc_end,
-):
-    lines = []
-
-    # Header
-    full_range = fmt_range(past_start, upc_end)
-    lines.append(f"*Account Management Master — Weekly Update ({full_range})*")
-
-    # Past
-    lines.append(DIVIDER)
-    past_range = fmt_range(past_start, past_end - timedelta(seconds=1))
-    lines.append(f"\U0001f4cb *PAST INTERACTIONS ({past_range})*")
-    lines.append("")
-    lines += build_section(past_groups, "_No meetings in the last 7 days._")
-
-    # Upcoming
-    lines.append(DIVIDER)
-    upc_range = fmt_range(today_utc, upc_end)
-    lines.append(f"\U0001f4c5 *UPCOMING INTERACTIONS ({upc_range})*")
-    lines.append("")
-    lines += build_section(upcoming_groups, "_No meetings scheduled in the next 7 days._")
-
-    # No interactions
-    lines.append(DIVIDER)
-    lines.append(f"⚠️ *NO INTERACTIONS ({len(no_interaction)} accounts)*")
-    lines.append("")
-
+def build_owner_chunks(no_interaction):
+    """Each chunk = one owner line."""
     owner_map = defaultdict(list)
     for co_name, co_id, owner_name in no_interaction:
         owner_map[owner_name].append((co_name, co_id))
-
+    chunks = []
     for owner in sorted(owner_map):
         cos   = sorted(owner_map[owner], key=lambda x: x[0])
         links = " · ".join(co_link_plain(n, cid) for n, cid in cos)
-        lines.append(f"_{owner}:_ {links}")
+        chunks.append(f"_{owner}:_ {links}")
+    return chunks
 
-    return "\n".join(lines)
+
+# ── Section posting ────────────────────────────────────────────────────────
+def post_section(channel_id, header, section_title, chunks, empty_msg, separator="\n\n"):
+    """Post a section as 1+ Slack messages.
+
+    Each message starts with: header \n DIVIDER \n section_title \n
+    Chunks are appended joined by `separator`. When adding the next chunk
+    would exceed SLACK_MSG_LIMIT, flush the current buffer and start a new
+    message with the same prefix.
+    """
+    prefix = f"{header}\n{DIVIDER}\n{section_title}\n"
+
+    if not chunks:
+        slk_post("chat.postMessage", {
+            "channel": channel_id,
+            "text":    prefix + empty_msg,
+            "mrkdwn":  True,
+        })
+        return 1
+
+    posted = 0
+    buf = []
+    buf_len = len(prefix)
+
+    def flush():
+        nonlocal posted
+        if not buf: return
+        text = prefix + separator.join(buf)
+        res = slk_post("chat.postMessage", {
+            "channel": channel_id, "text": text, "mrkdwn": True,
+        })
+        if res: posted += 1
+
+    for chunk in chunks:
+        added = (len(separator) + len(chunk)) if buf else len(chunk)
+        if buf and (buf_len + added) > SLACK_MSG_LIMIT:
+            flush()
+            buf = [chunk]
+            buf_len = len(prefix) + len(chunk)
+        else:
+            buf.append(chunk)
+            buf_len += added
+
+    flush()
+    return posted
 
 
 # ── Main ────────────────────────────────────────────────────────────────────
@@ -526,25 +537,50 @@ def main():
 
     log(f"Past groups: {len(past_groups)} | Upcoming: {len(upcoming_groups)} | No interactions: {len(no_interaction)}")
 
-    msg = build_message(
-        past_groups, upcoming_groups, no_interaction,
-        past_start, past_end, today_utc, upc_end,
+    # Date ranges
+    full_range = fmt_range(past_start, upc_end)
+    past_range = fmt_range(past_start, past_end - timedelta(seconds=1))
+    upc_range  = fmt_range(today_utc, upc_end)
+
+    # Common header on every message
+    header = f"*Account Management Master — Weekly Update ({full_range})*"
+
+    # Build chunks for each section
+    past_chunks = build_company_chunks(past_groups)
+    upc_chunks  = build_company_chunks(upcoming_groups)
+    ni_chunks   = build_owner_chunks(no_interaction)
+
+    total_posted = 0
+
+    # 1. Past Interactions
+    total_posted += post_section(
+        channel_id, header,
+        f"\U0001f4cb *PAST INTERACTIONS ({past_range})*",
+        past_chunks,
+        "_No meetings in the last 7 days._",
+        separator="\n\n",
     )
 
-    log(f"Message length: {len(msg)} chars")
-    log(f"--- preview ---\n{msg[:600]}\n--- end preview ---")
+    # 2. Upcoming Interactions
+    total_posted += post_section(
+        channel_id, header,
+        f"\U0001f4c5 *UPCOMING INTERACTIONS ({upc_range})*",
+        upc_chunks,
+        "_No meetings scheduled in the next 7 days._",
+        separator="\n\n",
+    )
 
-    res = slk_post("chat.postMessage", {
-        "channel": channel_id,
-        "text":    msg,
-        "mrkdwn":  True,
-    })
-    if res:
-        log(f"Weekly summary posted to #{CHANNEL_NAME}")
-        return 0
+    # 3. No Interactions
+    total_posted += post_section(
+        channel_id, header,
+        f"⚠️ *NO INTERACTIONS ({len(no_interaction)} accounts)*",
+        ni_chunks,
+        "_All accounts had a meeting in the last 7 days or have one scheduled in the next 7 days._",
+        separator="\n",
+    )
 
-    warn("Failed to post weekly summary")
-    return 1
+    log(f"Posted {total_posted} message(s) to #{CHANNEL_NAME}")
+    return 0 if total_posted >= 3 else 1
 
 
 if __name__ == "__main__":
