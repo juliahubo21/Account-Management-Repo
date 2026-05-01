@@ -253,6 +253,36 @@ def iso_z(dt):
     return dt.replace(microsecond=0).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
+# Keys we've seen Affinity wrap a list under, across V1 and V2 endpoints.
+LIST_WRAPPER_KEYS = ("data", "interactions", "meetings", "emails", "events",
+                     "notes", "results", "items", "list_entries")
+
+
+def extract_list(data, debug_label):
+    """Pull a list out of a heterogeneous Affinity response.
+
+    Affinity sometimes returns a bare list, sometimes a {"<key>": [...],
+    "next_page_token": ...} envelope where <key> varies by endpoint
+    (interactions, meetings, emails, data, etc.). If we can't find a list,
+    log the actual shape and return [] rather than iterating dict keys
+    (which would raise 'str' has no attribute 'get').
+    """
+    if data is None:
+        return []
+    if isinstance(data, list):
+        return data
+    if isinstance(data, dict):
+        for key in LIST_WRAPPER_KEYS:
+            v = data.get(key)
+            if isinstance(v, list):
+                return v
+        warn(f"{debug_label}: unexpected response shape; "
+             f"top-level keys: {list(data.keys())[:10]}")
+        return []
+    warn(f"{debug_label}: response is neither list nor dict: {type(data).__name__}")
+    return []
+
+
 def fetch_interactions(org_id, type_int, win_start, win_end):
     """V1 /interactions endpoint. type_int: 0 = meeting, 3 = email."""
     data = aff_get(
@@ -263,10 +293,7 @@ def fetch_interactions(org_id, type_int, win_start, win_end):
         end_time=iso_z(win_end),
         page_size=100,
     )
-    if data is None:
-        return []
-    items = data.get("interactions", data) if isinstance(data, dict) else data
-    return items or []
+    return extract_list(data, f"/interactions type={type_int} org={org_id}")
 
 
 def fetch_meetings(org_id, win_start, win_end):
@@ -318,12 +345,9 @@ def fetch_emails(org_id, win_start, win_end):
 def fetch_notes(org_id, win_start, win_end):
     """V2 /v2/companies/{id}/notes endpoint. Filters by createdAt client-side."""
     data = aff_get(f"/v2/companies/{org_id}/notes")
-    if data is None:
-        return []
-    # V2 response shape is {data: [...], pagination: {...}}; fall back to flat list.
-    items = data.get("data", data) if isinstance(data, dict) else data
+    items = extract_list(data, f"/v2/companies/{org_id}/notes")
     out = []
-    for n in items or []:
+    for n in items:
         created = parse_iso(n.get("createdAt") or n.get("created_at"))
         if not created or not (win_start <= created <= win_end):
             continue
