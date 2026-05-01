@@ -202,11 +202,20 @@ def classify(email):
 def normalize_persons(raw):
     """Turn a heterogeneous person list into [{name, email}], dropping incomplete entries.
 
-    Handles V1 snake_case (first_name, last_name, emails) and V2 camelCase
-    (firstName, lastName, emailAddresses).
+    Handles V1 snake_case, V2 camelCase, and bare email-string entries
+    (Affinity meeting `attendees` is a list of email strings, while
+    meeting `persons` is full Affinity person records).
     """
     out = []
     for p in raw or []:
+        # Bare email string (e.g. meetings.attendees entries).
+        if isinstance(p, str):
+            if "@" in p:
+                local = p.split("@", 1)[0]
+                # Prettify "first.last" → "First Last" if possible; else use the whole local part.
+                name = local.replace(".", " ").replace("_", " ").title()
+                out.append({"name": name, "email": p})
+            continue
         if not isinstance(p, dict):
             continue
         first = (p.get("first_name") or p.get("firstName") or "").strip()
@@ -218,11 +227,20 @@ def normalize_persons(raw):
             or p.get("emailAddresses")
             or p.get("email_addresses")
         )
+        email = None
         if isinstance(emails, list) and emails:
             first_entry = emails[0]
-            email = first_entry if isinstance(first_entry, str) else first_entry.get("address") or first_entry.get("email")
-        else:
-            email = p.get("email")
+            if isinstance(first_entry, str):
+                email = first_entry
+            elif isinstance(first_entry, dict):
+                email = first_entry.get("address") or first_entry.get("email")
+        if not email:
+            email = (
+                p.get("primary_email")
+                or p.get("primaryEmail")
+                or p.get("primaryEmailAddress")
+                or p.get("email")
+            )
             if isinstance(email, dict):
                 email = email.get("address") or email.get("email")
 
@@ -343,19 +361,24 @@ def fetch_meetings(org_id, win_start, win_end):
         start = first_iso(m)
         if not start:
             continue
+        # Combine all participant-shaped arrays. `persons` is the structured
+        # source (full Affinity person records); `attendees` is a bare list of
+        # email strings; combining lets normalize_persons handle whichever
+        # populated and dedup by email afterwards in split_participants.
+        raw_persons = []
+        for f in ("persons", "attendees", "participants",
+                  "attendee_persons", "attendeePersons"):
+            val = m.get(f)
+            if isinstance(val, list):
+                raw_persons.extend(val)
+            elif isinstance(val, dict):
+                raw_persons.append(val)
         out.append({
             "type": "meeting",
             "id": m.get("id"),
             "subject": m.get("title") or m.get("subject") or "(no subject)",
             "start": start,
-            "raw_persons": (
-                m.get("attendees")
-                or m.get("participants")
-                or m.get("persons")
-                or m.get("attendee_persons")
-                or m.get("attendeePersons")
-                or []
-            ),
+            "raw_persons": raw_persons,
         })
     return out
 
