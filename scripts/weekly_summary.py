@@ -39,8 +39,6 @@ DIVIDER       = "─" * 26
 MAX_TITLE     = 80
 MAX_EXT_NAMES = 5
 OWNERS_FIELD_FALLBACK = 5617247
-# Slack splits messages over ~4000 chars in the UI; use a safe threshold
-# below that and split at clean boundaries to avoid mid-company cuts.
 SLACK_MSG_LIMIT = 3500
 
 AFFINITY_KEY        = os.environ["AFFINITY_API_KEY"]
@@ -48,7 +46,6 @@ SLACK_TOKEN         = os.environ["SLACK_BOT_TOKEN"]
 CHANNEL_NAME        = os.environ.get("SLACK_CHANNEL_NAME", "account-management")
 CHANNEL_ID_OVERRIDE = os.environ.get("SLACK_CHANNEL_ID") or None
 
-# ── HTTP sessions ─────────────────────────────────────────────────────────────
 aff = requests.Session()
 aff.headers.update({
     "Authorization": f"Bearer {AFFINITY_KEY}",
@@ -401,7 +398,6 @@ def render_bullet(item):
 
 # ── Chunk builders ───────────────────────────────────────────────────────────
 def build_company_chunks(groups):
-    """Each chunk = one company's full block (header line + bullets), no trailing newline."""
     chunks = []
     for co_name, co_id, d, items in sorted(groups, key=lambda x: (x[2], x[0])):
         bullets = [b for b in (render_bullet(i) for i in items) if b]
@@ -412,7 +408,6 @@ def build_company_chunks(groups):
 
 
 def build_owner_chunks(no_interaction):
-    """Each chunk = one owner line."""
     owner_map = defaultdict(list)
     for co_name, co_id, owner_name in no_interaction:
         owner_map[owner_name].append((co_name, co_id))
@@ -426,13 +421,6 @@ def build_owner_chunks(no_interaction):
 
 # ── Section posting ────────────────────────────────────────────────────────
 def post_section(channel_id, header, section_title, chunks, empty_msg, separator="\n\n"):
-    """Post a section as 1+ Slack messages.
-
-    Each message starts with: header \n DIVIDER \n section_title \n
-    Chunks are appended joined by `separator`. When adding the next chunk
-    would exceed SLACK_MSG_LIMIT, flush the current buffer and start a new
-    message with the same prefix.
-    """
     prefix = f"{header}\n{DIVIDER}\n{section_title}\n"
 
     if not chunks:
@@ -537,15 +525,13 @@ def main():
 
     log(f"Past groups: {len(past_groups)} | Upcoming: {len(upcoming_groups)} | No interactions: {len(no_interaction)}")
 
-    # Date ranges
-    full_range = fmt_range(past_start, upc_end)
+    # Date ranges per section
     past_range = fmt_range(past_start, past_end - timedelta(seconds=1))
     upc_range  = fmt_range(today_utc, upc_end)
 
-    # Common header on every message
-    header = f"*Account Management Master — Weekly Update ({full_range})*"
+    # Header (shown on every message) — no date range here
+    header = "*Account Management Master — Weekly Update*"
 
-    # Build chunks for each section
     past_chunks = build_company_chunks(past_groups)
     upc_chunks  = build_company_chunks(upcoming_groups)
     ni_chunks   = build_owner_chunks(no_interaction)
@@ -570,10 +556,10 @@ def main():
         separator="\n\n",
     )
 
-    # 3. No Interactions
+    # 3. No Interactions — show both date ranges so the timeframe is explicit
     total_posted += post_section(
         channel_id, header,
-        f"⚠️ *NO INTERACTIONS ({len(no_interaction)} accounts)*",
+        f"⚠️ *NO INTERACTIONS — last 7 days ({past_range}) & next 7 days ({upc_range}) · {len(no_interaction)} accounts*",
         ni_chunks,
         "_All accounts had a meeting in the last 7 days or have one scheduled in the next 7 days._",
         separator="\n",
