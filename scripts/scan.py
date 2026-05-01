@@ -316,11 +316,22 @@ _logged_shape_for = set()
 
 
 def log_first_item_shape(label, items):
-    """One-time per-label log of the first item's top-level keys for diagnostics."""
+    """One-time per-label log of the first item — keys plus a value preview
+    so we can see actual field shapes, not just names."""
     if label in _logged_shape_for or not items:
         return
-    if isinstance(items[0], dict):
-        log(f"[shape] {label} item keys: {sorted(items[0].keys())[:30]}")
+    item = items[0]
+    if isinstance(item, dict):
+        log(f"[shape] {label} item keys: {sorted(item.keys())[:30]}")
+        # Log a value preview — truncated repr per top-level field — so we can
+        # see whether timestamps are strings/ints/None, what participant arrays
+        # look like, etc.
+        for k in sorted(item.keys())[:30]:
+            v = item[k]
+            preview = repr(v)
+            if len(preview) > 200:
+                preview = preview[:200] + "…"
+            log(f"[shape] {label}.{k} = {preview}")
     _logged_shape_for.add(label)
 
 
