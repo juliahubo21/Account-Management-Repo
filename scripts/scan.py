@@ -49,8 +49,11 @@ CHANNEL_NAME = os.environ["SLACK_CHANNEL_NAME"]
 CHANNEL_ID_OVERRIDE = os.environ.get("SLACK_CHANNEL_ID") or None
 
 aff = requests.Session()
-aff.auth = ("", AFFINITY_KEY)
-aff.headers["Accept"] = "application/json"
+aff.headers.update({
+    "Authorization": f"Bearer {AFFINITY_KEY}",
+    "X-Affinity-Api-Version": "2024-01-01",
+    "Accept": "application/json",
+})
 
 slk = requests.Session()
 slk.headers["Authorization"] = f"Bearer {SLACK_TOKEN}"
@@ -197,22 +200,31 @@ def classify(email):
 
 
 def normalize_persons(raw):
-    """Turn a heterogeneous person list into [{name, email}], dropping incomplete entries."""
+    """Turn a heterogeneous person list into [{name, email}], dropping incomplete entries.
+
+    Handles V1 snake_case (first_name, last_name, emails) and V2 camelCase
+    (firstName, lastName, emailAddresses).
+    """
     out = []
     for p in raw or []:
         if not isinstance(p, dict):
             continue
-        first = (p.get("first_name") or "").strip()
-        last = (p.get("last_name") or "").strip()
+        first = (p.get("first_name") or p.get("firstName") or "").strip()
+        last = (p.get("last_name") or p.get("lastName") or "").strip()
         name = f"{first} {last}".strip() or (p.get("name") or "").strip()
 
-        emails = p.get("emails")
+        emails = (
+            p.get("emails")
+            or p.get("emailAddresses")
+            or p.get("email_addresses")
+        )
         if isinstance(emails, list) and emails:
-            email = emails[0]
+            first_entry = emails[0]
+            email = first_entry if isinstance(first_entry, str) else first_entry.get("address") or first_entry.get("email")
         else:
             email = p.get("email")
-        if isinstance(email, dict):
-            email = email.get("address") or email.get("email")
+            if isinstance(email, dict):
+                email = email.get("address") or email.get("email")
 
         if not name or not email:
             continue
@@ -236,15 +248,33 @@ def split_participants(raw_persons):
     return motive, account
 
 
-def fetch_meetings(org_id, win_start, win_end):
-    data = aff_get("/meetings", organization_id=org_id, page_size=100)
+def iso_z(dt):
+    """ISO 8601 with Z suffix and no microseconds (Affinity's expected format)."""
+    return dt.replace(microsecond=0).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def fetch_interactions(org_id, type_int, win_start, win_end):
+    """V1 /interactions endpoint. type_int: 0 = meeting, 3 = email."""
+    data = aff_get(
+        "/interactions",
+        type=type_int,
+        organization_id=org_id,
+        start_time=iso_z(win_start),
+        end_time=iso_z(win_end),
+        page_size=100,
+    )
     if data is None:
         return []
-    items = data.get("meetings", data) if isinstance(data, dict) else data
+    items = data.get("interactions", data) if isinstance(data, dict) else data
+    return items or []
+
+
+def fetch_meetings(org_id, win_start, win_end):
+    items = fetch_interactions(org_id, 0, win_start, win_end)
     out = []
-    for m in items or []:
+    for m in items:
         start = parse_iso(m.get("start_time") or m.get("date"))
-        if not start or not (win_start <= start <= win_end):
+        if not start:
             continue
         out.append({
             "type": "meeting",
@@ -261,40 +291,12 @@ def fetch_meetings(org_id, win_start, win_end):
     return out
 
 
-def fetch_notes(org_id, win_start, win_end):
-    data = aff_get("/notes", organization_id=org_id, page_size=100)
-    if data is None:
-        return []
-    items = data.get("notes", data) if isinstance(data, dict) else data
-    out = []
-    for n in items or []:
-        created = parse_iso(n.get("created_at"))
-        if not created or not (win_start <= created <= win_end):
-            continue
-        raw = []
-        if n.get("creator"):
-            raw.append(n["creator"])
-        for p in n.get("persons") or []:
-            raw.append(p)
-        out.append({
-            "type": "note",
-            "id": n.get("id"),
-            "subject": (n.get("content") or "").replace("\n", " ").strip()[:80] or "(note)",
-            "start": created,
-            "raw_persons": raw,
-        })
-    return out
-
-
 def fetch_emails(org_id, win_start, win_end):
-    data = aff_get("/interactions", type=3, organization_id=org_id, page_size=100)
-    if data is None:
-        return []
-    items = data.get("interactions", data) if isinstance(data, dict) else data
+    items = fetch_interactions(org_id, 3, win_start, win_end)
     out = []
-    for e in items or []:
+    for e in items:
         sent = parse_iso(e.get("date") or e.get("sent_at") or e.get("timestamp"))
-        if not sent or not (win_start <= sent <= win_end):
+        if not sent:
             continue
         raw = []
         for f in ("from", "to", "cc", "participants", "persons"):
@@ -308,6 +310,34 @@ def fetch_emails(org_id, win_start, win_end):
             "id": e.get("id"),
             "subject": e.get("subject") or "(no subject)",
             "start": sent,
+            "raw_persons": raw,
+        })
+    return out
+
+
+def fetch_notes(org_id, win_start, win_end):
+    """V2 /v2/companies/{id}/notes endpoint. Filters by createdAt client-side."""
+    data = aff_get(f"/v2/companies/{org_id}/notes")
+    if data is None:
+        return []
+    # V2 response shape is {data: [...], pagination: {...}}; fall back to flat list.
+    items = data.get("data", data) if isinstance(data, dict) else data
+    out = []
+    for n in items or []:
+        created = parse_iso(n.get("createdAt") or n.get("created_at"))
+        if not created or not (win_start <= created <= win_end):
+            continue
+        raw = []
+        if n.get("creator"):
+            raw.append(n["creator"])
+        for p in n.get("associatedPersons") or n.get("persons") or []:
+            raw.append(p)
+        content = (n.get("content") or n.get("contentText") or "").replace("\n", " ").strip()
+        out.append({
+            "type": "note",
+            "id": n.get("id"),
+            "subject": content[:80] or "(note)",
+            "start": created,
             "raw_persons": raw,
         })
     return out
