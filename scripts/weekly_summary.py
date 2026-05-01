@@ -2,21 +2,21 @@
 """
 Account Management weekly summary.
 
-Runs every Friday. Fetches the past 7 days of interactions and upcoming
-14 days of meetings from the "Account Management Master" Affinity list,
-then posts a single formatted Slack message to #account-management.
+Posts a single succinct Slack message every Friday.
+
+Sections:
+  PAST INTERACTIONS     last 7 days, meetings only
+  UPCOMING INTERACTIONS next 14 days, meetings only
+  NO INTERACTIONS       accounts with nothing in either window, grouped by owner
 
 Env vars:
     AFFINITY_API_KEY      Affinity REST API key (V1)
     SLACK_BOT_TOKEN       Slack bot token (xoxb-...)
     SLACK_CHANNEL_NAME    Channel name (default: account-management)
     SLACK_CHANNEL_ID      (optional) Channel ID to skip conversations.list
-
-Exit codes:
-    0  success
-    1  fatal error (list/channel not found, Slack post failed)
 """
 import os
+import re
 import sys
 from collections import defaultdict
 from datetime import datetime, timedelta, timezone
@@ -34,8 +34,9 @@ ROOM_ALIASES  = {"nyreception@motivepartners.com"}
 PAST_DAYS     = 7
 UPCOMING_DAYS = 14
 NY_TZ         = ZoneInfo("America/New_York")
-DIVIDER       = "─" * 26  # ──────────────────────────────
-# Fallback owners field ID (from known config)
+DIVIDER       = "─" * 26
+MAX_TITLE     = 80
+MAX_EXT_NAMES = 5  # show first N external names, then "(+ M more)"
 OWNERS_FIELD_FALLBACK = 5617247
 
 AFFINITY_KEY        = os.environ["AFFINITY_API_KEY"]
@@ -73,18 +74,21 @@ def aff_get(path, **params):
 
 
 LIST_KEYS = (
-    "data", "interactions", "meetings", "emails", "list_entries",
-    "field_values", "results", "items", "fields", "lists", "persons",
+    "data", "interactions", "meetings", "emails", "events",
+    "list_entries", "field_values", "results", "items",
+    "fields", "lists", "persons",
 )
 
+
 def unpack(data, label=""):
+    """Pull a list out of a heterogeneous Affinity response."""
     if data is None: return []
     if isinstance(data, list): return data
     if isinstance(data, dict):
         for k in LIST_KEYS:
             v = data.get(k)
             if isinstance(v, list): return v
-    warn(f"{label}: unexpected response shape: {str(data)[:120]}")
+        warn(f"{label}: unexpected response keys: {list(data.keys())[:6]}")
     return []
 
 
@@ -139,6 +143,29 @@ def find_channel_id(name):
         if not cursor: return None
 
 
+# ── Slack mrkdwn formatting ────────────────────────────────────────────────────
+def slk_escape(text):
+    """Escape characters Slack treats specially in mrkdwn link labels."""
+    return (text or "").replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+
+
+def slk_link(url, label):
+    safe = (label or "").replace("|", "/")
+    return f"<{url}|{slk_escape(safe)}>"
+
+
+def co_url(co_id):
+    return f"{AFFINITY_URL}/companies/{co_id}"
+
+
+def co_link_bold(name, co_id):
+    return f"*{slk_link(co_url(co_id), name)}*"
+
+
+def co_link_plain(name, co_id):
+    return slk_link(co_url(co_id), name)
+
+
 # ── List / entry helpers ──────────────────────────────────────────────────────
 def find_list_id(name):
     data = aff_get("/lists")
@@ -166,66 +193,56 @@ def find_owners_field_id(list_id):
         if (f.get("name") or "").lower() in ("owners", "owner", "deal owner"):
             log(f"Found owners field: id={f['id']} name={f['name']}")
             return f["id"]
-    log(f"Owners field not found dynamically; using fallback id={OWNERS_FIELD_FALLBACK}")
+    log(f"Owners field not found dynamically; using fallback {OWNERS_FIELD_FALLBACK}")
     return OWNERS_FIELD_FALLBACK
 
 
-# ── Person cache ──────────────────────────────────────────────────────────────
+# ── Person / owner caches ──────────────────────────────────────────────────────
 _person_cache = {}
+_owners_cache = {}
 
 
-def _fetch_person(person_id):
+def get_person_name(person_id):
+    if person_id is None: return ""
     if person_id in _person_cache:
         return _person_cache[person_id]
     data = aff_get(f"/persons/{person_id}")
     if not data:
-        _person_cache[person_id] = {}
-        return {}
+        _person_cache[person_id] = ""
+        return ""
     first = (data.get("first_name") or "").strip()
     last  = (data.get("last_name")  or "").strip()
     name  = f"{first} {last}".strip()
-
-    affiliations = data.get("organization_affiliations") or []
-    orgs = {o["id"]: o.get("name", "") for o in (data.get("organizations") or [])}
-    title, company = "", ""
-    for aff_item in affiliations:
-        t   = (aff_item.get("title") or "").strip()
-        oid = aff_item.get("organization_id")
-        c   = orgs.get(oid, "") if oid else ""
-        if aff_item.get("primary") or not title:
-            title, company = t, c
-        if aff_item.get("primary"): break
-    if not company and orgs:
-        company = next(iter(orgs.values()))
-
-    result = {"name": name, "title": title, "company": company}
-    _person_cache[person_id] = result
-    return result
+    _person_cache[person_id] = name
+    return name
 
 
-def get_person_name(person_id):
-    return _fetch_person(person_id).get("name", "") if person_id else ""
-
-
-def get_person_details(person_id):
-    return _fetch_person(person_id) if person_id else {}
-
-
-# ── Owner lookup ──────────────────────────────────────────────────────────────
-def get_all_owners(list_id, field_id):
-    """Returns {org_id (int): [owner_name, ...]}"""
-    if not field_id: return {}
-    data = aff_get("/field-values", list_id=list_id, field_id=field_id)
-    result = defaultdict(list)
-    for fv in unpack(data, "/field-values"):
-        entity_id = fv.get("entity_id")
+def get_owners_for_entry(entry_id, owners_field_id):
+    """V1 /field-values requires exactly one of person_id/organization_id/
+    opportunity_id/list_entry_id — we use list_entry_id and filter client-side."""
+    if not entry_id or not owners_field_id:
+        return []
+    if entry_id in _owners_cache:
+        return _owners_cache[entry_id]
+    data = aff_get("/field-values", list_entry_id=entry_id)
+    owners = []
+    for fv in unpack(data, f"/field-values entry={entry_id}"):
+        if str(fv.get("field_id")) != str(owners_field_id):
+            continue
         value = fv.get("value")
-        if not entity_id: continue
-        person_ids = value if isinstance(value, list) else ([value] if value else [])
-        for pid in person_ids:
-            name = get_person_name(pid)
-            if name: result[int(entity_id)].append(name)
-    return dict(result)
+        ids = []
+        if isinstance(value, list):
+            ids = [v.get("id") if isinstance(v, dict) else v for v in value]
+        elif isinstance(value, dict):
+            ids = [value.get("id") or value.get("person_id")]
+        elif value:
+            ids = [value]
+        for pid in ids:
+            if pid:
+                name = get_person_name(pid)
+                if name: owners.append(name)
+    _owners_cache[entry_id] = owners
+    return owners
 
 
 # ── Participant handling ──────────────────────────────────────────────────────
@@ -235,14 +252,17 @@ def classify(email):
     return "motive" if email.split("@", 1)[1].lower() == MOTIVE_DOMAIN else "external"
 
 
+def name_from_email(email):
+    local = email.split("@")[0]
+    return local.replace(".", " ").replace("_", " ").title()
+
+
 def normalize_persons(raw):
     out = []
     for p in (raw or []):
         if isinstance(p, str):
             if "@" in p:
-                local = p.split("@")[0]
-                name = local.replace(".", " ").replace("_", " ").title()
-                out.append({"id": None, "name": name, "email": p.lower()})
+                out.append({"name": name_from_email(p), "email": p.lower()})
         elif isinstance(p, dict):
             first = (p.get("first_name") or p.get("firstName") or "").strip()
             last  = (p.get("last_name")  or p.get("lastName")  or "").strip()
@@ -254,43 +274,36 @@ def normalize_persons(raw):
                 email = e0 if isinstance(e0, str) else (e0.get("address") or e0.get("email") or "")
             email = email or p.get("primary_email") or p.get("primaryEmail") or ""
             if isinstance(email, dict): email = email.get("address", "")
+            email = (email or "").lower()
+            if not name and email:
+                name = name_from_email(email)
             if name or email:
-                out.append({"id": p.get("id"), "name": name, "email": (email or "").lower()})
+                out.append({"name": name, "email": email})
     return out
 
 
 def split_attendees(raw_persons):
-    """Returns ([motive_name, ...], [{name, title, company}, ...])"""
+    """([motive_names], [external_names]) deduplicated by email."""
     motive, external, seen = [], [], set()
     for p in normalize_persons(raw_persons):
         key = p["email"] or p["name"]
         if key in seen: continue
         seen.add(key)
         cls = classify(p["email"])
-        if cls == "drop": continue
-        if cls == "motive":
-            motive.append(p["name"])
-        else:
-            det = get_person_details(p["id"]) if p.get("id") else {}
-            external.append({
-                "name":    p["name"],
-                "title":   det.get("title", ""),
-                "company": det.get("company", ""),
-            })
+        if cls == "drop":   continue
+        if cls == "motive": motive.append(p["name"])
+        else:               external.append(p["name"])
     return motive, external
 
 
-def fmt_external(ext):
-    title   = (ext.get("title")   or "").strip()
-    company = (ext.get("company") or "").strip()
-    name    = ext["name"]
-    if title and company: return f"{name} ({title} · {company})"
-    if company:           return f"{name} ({company})"
-    if title:             return f"{name} ({title})"
-    return name
+def has_motive(item):
+    return any(
+        classify(p["email"]) == "motive"
+        for p in normalize_persons(item["raw"])
+    )
 
 
-# ── Interaction fetching ──────────────────────────────────────────────────────
+# ── Meeting fetching ─────────────────────────────────────────────────────────
 DATE_FIELDS = (
     "start_time", "startTime", "date", "sent_at", "sentAt",
     "occurred_at", "occurredAt", "scheduled_for", "scheduledFor",
@@ -307,20 +320,15 @@ def first_dt(item):
     return None
 
 
-def _fetch_interactions(org_id, type_int, start, end):
+def fetch_meetings(org_id, start, end):
     data = aff_get(
         "/interactions",
-        type=type_int, organization_id=org_id,
+        type=0, organization_id=org_id,
         start_time=iso_z(start), end_time=iso_z(end),
         page_size=100,
     )
-    return unpack(data, f"/interactions type={type_int} org={org_id}")
-
-
-def fetch_meetings(org_id, start, end):
-    items = _fetch_interactions(org_id, 0, start, end)
     out = []
-    for m in items:
+    for m in unpack(data, f"/interactions meetings org={org_id}"):
         dt = first_dt(m)
         if not dt: continue
         raw = []
@@ -328,7 +336,6 @@ def fetch_meetings(org_id, start, end):
             v = m.get(f)
             if isinstance(v, list): raw.extend(v)
         out.append({
-            "type":  "meeting",
             "id":    m.get("id"),
             "dt":    dt,
             "title": m.get("title") or m.get("subject") or "(no title)",
@@ -337,46 +344,34 @@ def fetch_meetings(org_id, start, end):
     return out
 
 
-def fetch_emails(org_id, start, end):
-    items = _fetch_interactions(org_id, 3, start, end)
-    out = []
-    for e in items:
-        dt = first_dt(e)
-        if not dt: continue
-        raw = []
-        for f in ("from", "to", "cc", "participants", "persons"):
-            v = e.get(f)
-            if isinstance(v, dict): raw.append(v)
-            elif isinstance(v, list): raw.extend(v)
-        out.append({
-            "type":  "email",
-            "id":    e.get("id"),
-            "dt":    dt,
-            "title": e.get("subject") or "(no subject)",
-            "raw":   raw,
-        })
-    return out
+# Dedupe meetings by (date, normalized title) within a company
+_PREFIX = re.compile(r"^(re|fw|fwd):\s*", re.I)
 
 
-def has_motive(item):
-    return any(
-        classify(p["email"]) == "motive"
-        for p in normalize_persons(item["raw"])
-    )
+def norm_title(t):
+    return _PREFIX.sub("", (t or "").strip()).lower()
 
 
-# ── Date formatting ───────────────────────────────────────────────────────────
+def dedupe_meetings(items):
+    """Keep one meeting per (date, normalized title), preferring earliest dt."""
+    seen = {}
+    for item in items:
+        key = (ny_date(item["dt"]), norm_title(item["title"]))
+        if key not in seen or item["dt"] < seen[key]["dt"]:
+            seen[key] = item
+    return list(seen.values())
+
+
+# ── Date formatting ────────────────────────────────────────────────────────────
 def ny_date(dt_utc):
     return dt_utc.astimezone(NY_TZ).date()
 
 
 def fmt_month_day(d):
-    """date -> 'May 1'"""
     return datetime(d.year, d.month, d.day).strftime("%b %-d")
 
 
 def fmt_range(start_utc, end_utc):
-    """'Apr 25–May 1' or 'May 1–15' if same month"""
     s = start_utc.astimezone(NY_TZ)
     e = end_utc.astimezone(NY_TZ)
     if s.month == e.month and s.year == e.year:
@@ -384,37 +379,35 @@ def fmt_range(start_utc, end_utc):
     return f"{s.strftime('%b %-d')}–{e.strftime('%b %-d')}"
 
 
-# ── Message builder ───────────────────────────────────────────────────────────
-def co_link_bold(name, co_id):
-    return f"**[{name}]({AFFINITY_URL}/companies/{co_id})**"
+# ── Bullet rendering ──────────────────────────────────────────────────────────
+def truncate(s, n):
+    s = (s or "").strip()
+    return s if len(s) <= n else s[:n - 1].rstrip() + "…"
 
 
-def co_link_plain(name, co_id):
-    return f"[{name}]({AFFINITY_URL}/companies/{co_id})"
+def fmt_externals(externals):
+    if not externals: return ""
+    if len(externals) <= MAX_EXT_NAMES:
+        return ", ".join(externals)
+    head = ", ".join(externals[:MAX_EXT_NAMES])
+    return f"{head} (+ {len(externals) - MAX_EXT_NAMES} more)"
 
 
 def render_bullet(item):
-    """Render one interaction as a bullet line, or None if no Motive attendees."""
     motive, external = split_attendees(item["raw"])
     if not motive: return None
-    m_str = ", ".join(f"**{n}**" for n in motive)
-    e_str = " ".join(fmt_external(e) for e in external) if external else ""
-    if e_str:
-        return f"• _{item['title']}_ — {m_str} with {e_str}"
-    return f"• _{item['title']}_ — {m_str}"
+    title = truncate(item["title"], MAX_TITLE)
+    m_str = ", ".join(f"*{n}*" for n in motive)
+    if external:
+        return f"• _{title}_ — {m_str} with {fmt_externals(external)}"
+    return f"• _{title}_ — {m_str}"
 
 
 def build_section(groups, empty_msg):
-    """
-    groups: [(co_name, co_id, date_obj, [items])]
-    Returns list of lines.
-    """
+    """groups: [(co_name, co_id, date_obj, [items])]"""
     lines = []
-    # Sort by date, then company name
-    sorted_groups = sorted(groups, key=lambda x: (x[2], x[0]))
-    for co_name, co_id, d, items in sorted_groups:
-        bullets = [render_bullet(i) for i in items]
-        bullets = [b for b in bullets if b]
+    for co_name, co_id, d, items in sorted(groups, key=lambda x: (x[2], x[0])):
+        bullets = [b for b in (render_bullet(i) for i in items) if b]
         if not bullets: continue
         lines.append(f"{co_link_bold(co_name, co_id)} · {fmt_month_day(d)}")
         lines.extend(bullets)
@@ -433,26 +426,25 @@ def build_message(
 
     # Header
     full_range = fmt_range(past_start, upc_end)
-    lines.append(f"**Account Management Master — Weekly Update ({full_range})**")
+    lines.append(f"*Account Management Master — Weekly Update ({full_range})*")
 
-    # ── Past interactions
+    # Past
     lines.append(DIVIDER)
     past_range = fmt_range(past_start, past_end - timedelta(seconds=1))
-    lines.append(f"\U0001f4cb **PAST INTERACTIONS ({past_range})**")
+    lines.append(f"\U0001f4cb *PAST INTERACTIONS ({past_range})*")
     lines.append("")
-    lines += build_section(past_groups, "_No past interactions this week._")
+    lines += build_section(past_groups, "_No meetings this week._")
 
-    # ── Upcoming interactions
+    # Upcoming
     lines.append(DIVIDER)
     upc_range = fmt_range(today_utc, upc_end)
-    lines.append(f"\U0001f4c5 **UPCOMING INTERACTIONS ({upc_range})**")
+    lines.append(f"\U0001f4c5 *UPCOMING INTERACTIONS ({upc_range})*")
     lines.append("")
     lines += build_section(upcoming_groups, "_No upcoming meetings in the next 2 weeks._")
 
-    # ── No interactions
+    # No interactions
     lines.append(DIVIDER)
-    n = len(no_interaction)
-    lines.append(f"⚠️ **NO INTERACTIONS ({n} accounts)**")
+    lines.append(f"⚠️ *NO INTERACTIONS ({len(no_interaction)} accounts)*")
     lines.append("")
 
     owner_map = defaultdict(list)
@@ -467,7 +459,7 @@ def build_message(
     return "\n".join(lines)
 
 
-# ── Main ──────────────────────────────────────────────────────────────────────
+# ── Main ────────────────────────────────────────────────────────────────────
 def main():
     now = datetime.now(timezone.utc)
     today_ny  = now.astimezone(NY_TZ).replace(hour=0, minute=0, second=0, microsecond=0)
@@ -478,56 +470,45 @@ def main():
     upc_start  = today_utc
     upc_end    = today_utc + timedelta(days=UPCOMING_DAYS)
 
-    log(f"Past window:     {past_start.date()} -> {past_end.date()}")
-    log(f"Upcoming window: {upc_start.date()} -> {upc_end.date()}")
+    log(f"Past:     {past_start.date()} -> {past_end.date()}")
+    log(f"Upcoming: {upc_start.date()} -> {upc_end.date()}")
 
-    # Affinity list
     list_id = find_list_id(LIST_NAME)
     if not list_id:
         warn(f"List '{LIST_NAME}' not found"); return 1
     log(f"List '{LIST_NAME}' id={list_id}")
 
-    # Slack channel
     channel_id = CHANNEL_ID_OVERRIDE or find_channel_id(CHANNEL_NAME)
     if not channel_id:
         warn(f"Channel '{CHANNEL_NAME}' not found"); return 1
-    log(f"Channel '{CHANNEL_NAME}' id={channel_id}")
+    log(f"Channel id={channel_id}")
 
-    # Owners field
     owners_field_id = find_owners_field_id(list_id)
-    all_owners = get_all_owners(list_id, owners_field_id)
-    log(f"Owner mappings loaded: {len(all_owners)} companies")
 
-    # List entries
     entries = get_list_entries(list_id)
     log(f"List entries: {len(entries)}")
 
-    past_groups     = []  # (co_name, co_id, date_obj, [items])
-    upcoming_groups = []
-    no_interaction  = []  # (co_name, co_id, owner_name)
+    past_groups, upcoming_groups, no_interaction = [], [], []
 
     for entry in entries:
         if entry.get("entity_type") not in (1, "organization"):
             continue
-        entity  = entry.get("entity") or {}
-        co_id   = entity.get("id") or entry.get("entity_id")
-        co_name = entity.get("name") or f"org #{co_id}"
+        entity   = entry.get("entity") or {}
+        co_id    = entity.get("id") or entry.get("entity_id")
+        co_name  = entity.get("name") or f"org #{co_id}"
+        entry_id = entry.get("id")
         if not co_id: continue
 
         try:
-            past_items = (
-                fetch_meetings(co_id, past_start, past_end)
-                + fetch_emails(co_id, past_start, past_end)
-            )
-            upc_items = fetch_meetings(co_id, upc_start, upc_end)
+            past_items = fetch_meetings(co_id, past_start, past_end)
+            upc_items  = fetch_meetings(co_id, upc_start, upc_end)
         except Exception as e:
             warn(f"{co_name}: fetch error: {e}")
             past_items, upc_items = [], []
 
-        past_items = [i for i in past_items if has_motive(i)]
-        upc_items  = [i for i in upc_items  if has_motive(i)]
+        past_items = dedupe_meetings([i for i in past_items if has_motive(i)])
+        upc_items  = dedupe_meetings([i for i in upc_items  if has_motive(i)])
 
-        # Group by (company, date)
         def group_by_date(items, target):
             by_date = defaultdict(list)
             for item in items:
@@ -539,7 +520,7 @@ def main():
         group_by_date(upc_items,  upcoming_groups)
 
         if not past_items and not upc_items:
-            owners     = all_owners.get(int(co_id), [])
+            owners     = get_owners_for_entry(entry_id, owners_field_id)
             owner_name = owners[0] if owners else "Unassigned"
             no_interaction.append((co_name, co_id, owner_name))
 
@@ -551,14 +532,13 @@ def main():
     )
 
     log(f"Message length: {len(msg)} chars")
-    log(f"--- preview ---\n{msg[:800]}\n--- end preview ---")
+    log(f"--- preview ---\n{msg[:600]}\n--- end preview ---")
 
     res = slk_post("chat.postMessage", {
         "channel": channel_id,
         "text":    msg,
         "mrkdwn":  True,
     })
-
     if res:
         log(f"Weekly summary posted to #{CHANNEL_NAME}")
         return 0
