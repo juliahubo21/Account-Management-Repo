@@ -2,10 +2,11 @@ name: Account Management Daily Scan
 
 on:
   schedule:
-    # 14:00 UTC = 10:00 EDT (summer)
-    - cron: '0 14 * * *'
-    # 15:00 UTC = 10:00 EST (winter)
-    - cron: '0 15 * * *'
+    - cron: '7 14 * * *'
+    # 14:07 UTC = 10:00 EDT (summer)
+    - cron: '7 15 * * *'
+    # 15:07 UTC = 10:00 EST (winter)
+    
   workflow_dispatch:
 
 concurrency:
