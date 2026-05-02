@@ -2,11 +2,11 @@ name: Account Management Daily Scan
 
 on:
   schedule:
-    - cron: '7 14 * * *'
-    # 14:07 UTC = 10:00 EDT (summer)
-    - cron: '7 15 * * *'
-    # 15:07 UTC = 10:00 EST (winter)
-    
+    - cron: '23 13 * * *'
+    # 13:23 UTC = 09:23 EDT (summer)
+    - cron: '23 14 * * *'
+    # 14:23 UTC = 09:23 EST (winter)
+
   workflow_dispatch:
 
 concurrency:
@@ -18,14 +18,14 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
-      - name: Gate to 10:00 America/New_York
-        # Both crons fire daily; only proceed when local NY hour is 10.
+      - name: Gate to 09:00 America/New_York
+        # Both crons fire daily; only proceed when local NY hour is 9.
         # workflow_dispatch bypasses the gate.
         if: github.event_name == 'schedule'
         run: |
           NY_HOUR=$(TZ=America/New_York date +%H)
-          if [ "$NY_HOUR" != "10" ]; then
-            echo "Local hour in America/New_York is $NY_HOUR; skipping (only run at 10)."
+          if [ "$NY_HOUR" != "09" ]; then
+            echo "Local hour in America/New_York is $NY_HOUR; skipping (only run at 9)."
             echo "SKIP=1" >> "$GITHUB_ENV"
           fi
 
