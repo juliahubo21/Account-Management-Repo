@@ -2,10 +2,10 @@ name: Account Management Weekly Summary
 
 on:
   schedule:
-    - cron: '7 15 * * 5'
-    # 15:07 UTC = 11:07 EDT (summer)
-    - cron: '7 16 * * 5'
-    # 16:07 UTC = 11:07 EST (winter)
+    - cron: '23 14 * * 5'
+    # 14:23 UTC = 10:23 EDT (summer)
+    - cron: '23 15 * * 5'
+    # 15:23 UTC = 10:23 EST (winter)
 
   workflow_dispatch:
 
@@ -18,14 +18,14 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
-      - name: Gate to 11:00 America/New_York
-        # Both crons fire on Fridays; only proceed when local NY hour is 11.
+      - name: Gate to 10:00 America/New_York
+        # Both crons fire on Fridays; only proceed when local NY hour is 10.
         # workflow_dispatch bypasses the gate.
         if: github.event_name == 'schedule'
         run: |
           NY_HOUR=$(TZ=America/New_York date +%H)
-          if [ "$NY_HOUR" != "11" ]; then
-            echo "Local hour in America/New_York is $NY_HOUR; skipping (only run at 11)."
+          if [ "$NY_HOUR" != "10" ]; then
+            echo "Local hour in America/New_York is $NY_HOUR; skipping (only run at 10)."
             echo "SKIP=1" >> "$GITHUB_ENV"
           fi
 
