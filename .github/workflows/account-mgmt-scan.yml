@@ -18,15 +18,21 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
-      - name: Gate to 09:00 America/New_York
-        # Both crons fire daily; only proceed when local NY hour is 9.
-        # workflow_dispatch bypasses the gate.
+      - name: Gate to 09:00-13:00 America/New_York
+        # Both crons fire daily; we accept any NY hour from 9-13 so delayed
+        # scheduled fires (GitHub Actions can run hours late under load) still
+        # complete the scan. The dedup-by-key logic in scan.py prevents duplicate
+        # Slack posts even if both crons execute on the same day.
+        # workflow_dispatch bypasses the gate entirely.
         if: github.event_name == 'schedule'
         run: |
           NY_HOUR=$(TZ=America/New_York date +%H)
-          if [ "$NY_HOUR" != "09" ]; then
-            echo "Local hour in America/New_York is $NY_HOUR; skipping (only run at 9)."
+          NY_HOUR_NUM=$((10#$NY_HOUR))
+          if [ "$NY_HOUR_NUM" -lt 9 ] || [ "$NY_HOUR_NUM" -gt 13 ]; then
+            echo "NY hour is $NY_HOUR; outside 09-13 window, skipping."
             echo "SKIP=1" >> "$GITHUB_ENV"
+          else
+            echo "NY hour is $NY_HOUR; proceeding with scan."
           fi
 
       - name: Checkout
@@ -78,7 +84,5 @@ jobs:
           AFFINITY_API_KEY: ${{ secrets.AFFINITY_API_KEY }}
           SLACK_BOT_TOKEN: ${{ secrets.SLACK_BOT_TOKEN }}
           SLACK_CHANNEL_NAME: account-management
-          # Optional: set SLACK_CHANNEL_ID secret to skip conversations.list
-          # (needed for private channels without groups:read scope).
           SLACK_CHANNEL_ID: ${{ secrets.SLACK_CHANNEL_ID }}
         run: python scripts/scan.py
