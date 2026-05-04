@@ -471,7 +471,9 @@ def fetch_notes(org_id, win_start, win_end):
             raw.append(n["creator"])
         for p in n.get("associatedPersons") or n.get("persons") or []:
             raw.append(p)
-        content = (n.get("content") or n.get("contentText") or "").replace("\n", " ").strip()
+        _c = n.get("content") or n.get("contentText") or ""
+        if isinstance(_c, dict): _c = _c.get("html") or _c.get("text") or ""
+        content = str(_c).replace("\n", " ").strip()
         out.append({
             "type": "note",
             "id": n.get("id"),
