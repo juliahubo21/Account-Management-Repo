@@ -1,11 +1,17 @@
 name: Account Management Daily Scan
 
+# Multiple cron fires per day act as redundancy against GitHub Actions
+# scheduling unreliability — at least one is virtually guaranteed to run.
+# scripts/scan.py dedupes posts via Slack channel history markers, so
+# repeated runs on the same day post nothing duplicate.
+
 on:
   schedule:
-    - cron: '23 13 * * *'
-    # 13:23 UTC = 09:23 EDT (summer)
-    - cron: '23 14 * * *'
-    # 14:23 UTC = 09:23 EST (winter)
+    - cron: '23 13 * * *'  # 13:23 UTC = 09:23 EDT / 08:23 EST
+    - cron: '23 15 * * *'  # 15:23 UTC = 11:23 EDT / 10:23 EST
+    - cron: '23 17 * * *'  # 17:23 UTC = 13:23 EDT / 12:23 EST
+    - cron: '23 19 * * *'  # 19:23 UTC = 15:23 EDT / 14:23 EST
+    - cron: '23 21 * * *'  # 21:23 UTC = 17:23 EDT / 16:23 EST
 
   workflow_dispatch:
 
@@ -18,39 +24,18 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
-      - name: Gate to 09:00-13:00 America/New_York
-        # Both crons fire daily; we accept any NY hour from 9-13 so delayed
-        # scheduled fires (GitHub Actions can run hours late under load) still
-        # complete the scan. The dedup-by-key logic in scan.py prevents duplicate
-        # Slack posts even if both crons execute on the same day.
-        # workflow_dispatch bypasses the gate entirely.
-        if: github.event_name == 'schedule'
-        run: |
-          NY_HOUR=$(TZ=America/New_York date +%H)
-          NY_HOUR_NUM=$((10#$NY_HOUR))
-          if [ "$NY_HOUR_NUM" -lt 9 ] || [ "$NY_HOUR_NUM" -gt 13 ]; then
-            echo "NY hour is $NY_HOUR; outside 09-13 window, skipping."
-            echo "SKIP=1" >> "$GITHUB_ENV"
-          else
-            echo "NY hour is $NY_HOUR; proceeding with scan."
-          fi
-
       - name: Checkout
-        if: env.SKIP != '1'
         uses: actions/checkout@v4
 
       - name: Set up Python
-        if: env.SKIP != '1'
         uses: actions/setup-python@v5
         with:
           python-version: '3.12'
 
       - name: Install Python dependencies
-        if: env.SKIP != '1'
         run: pip install -r requirements.txt
 
       - name: Verify Slack bot token
-        if: env.SKIP != '1'
         env:
           SLACK_BOT_TOKEN: ${{ secrets.SLACK_BOT_TOKEN }}
         run: |
@@ -65,7 +50,6 @@ jobs:
           echo "Slack auth ok: team $(echo "$AUTH" | jq -r .team), bot $(echo "$AUTH" | jq -r .user)"
 
       - name: Verify Affinity REST API
-        if: env.SKIP != '1'
         env:
           AFFINITY_API_KEY: ${{ secrets.AFFINITY_API_KEY }}
         run: |
@@ -79,7 +63,6 @@ jobs:
           echo "Affinity auth ok"
 
       - name: Run daily scan
-        if: env.SKIP != '1'
         env:
           AFFINITY_API_KEY: ${{ secrets.AFFINITY_API_KEY }}
           SLACK_BOT_TOKEN: ${{ secrets.SLACK_BOT_TOKEN }}
