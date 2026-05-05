@@ -7,50 +7,52 @@ name: Daily Fintech Market Scan
 
 on:
   schedule:
-    - cron: '7 13 * * *'   # 13:07 UTC = 09:07 EDT / 08:07 EST
-    - cron: '7 15 * * *'   # 15:07 UTC = 11:07 EDT / 10:07 EST
-    - cron: '7 17 * * *'   # 17:07 UTC = 13:07 EDT / 12:07 EST
-    - cron: '7 19 * * *'   # 19:07 UTC = 15:07 EDT / 14:07 EST
-    - cron: '7 21 * * *'   # 21:07 UTC = 17:07 EDT / 16:07 EST
+    - cron: '23 13 * * *'  # 13:23 UTC = 09:23 EDT / 08:23 EST
+    - cron: '23 15 * * *'  # 15:23 UTC = 11:23 EDT / 10:23 EST
+    - cron: '23 17 * * *'  # 17:23 UTC = 13:23 EDT / 12:23 EST
+    - cron: '23 19 * * *'  # 19:23 UTC = 15:23 EDT / 14:23 EST
+    - cron: '23 21 * * *'  # 21:23 UTC = 17:23 EDT / 16:23 EST
   workflow_dispatch:
-    inputs:
-      dry_run:
-        description: 'Dry run — print message without posting to Slack'
-        required: false
-        default: 'false'
-        type: choice
-        options: ['false', 'true']
 
-# Required secrets:
-#   SLACK_BOT_TOKEN          — Slack bot token for Julia's App (xoxb-...)
-#
-# Optional secrets (enable live Pitchbook data via MCP):
-#   ANTHROPIC_API_KEY        — Anthropic API key
-#   PITCHBOOK_MCP_SERVER_URL — Pitchbook MCP server URL
-#   PITCHBOOK_MCP_AUTH_TOKEN — Auth token for the Pitchbook MCP server
+concurrency:
+  group: daily-fintech-scan
+  cancel-in-progress: false
 
 jobs:
-  post-market-scan:
+  scan:
     runs-on: ubuntu-latest
     timeout-minutes: 15
 
     steps:
-      - name: Checkout repository
+      - name: Checkout
         uses: actions/checkout@v4
 
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
-          python-version: '3.11'
+          python-version: '3.12'
 
-      - name: Install dependencies
-        run: pip install requests feedparser beautifulsoup4 python-dateutil pytz anthropic
+      - name: Install Python dependencies
+        run: pip install -r requirements.txt
 
-      - name: Run market scan and post to Slack
+      - name: Verify Slack bot token
+        env:
+          SLACK_BOT_TOKEN: ${{ secrets.SLACK_BOT_TOKEN }}
+        run: |
+          AUTH=$(curl -sS -X POST -H "Authorization: Bearer $SLACK_BOT_TOKEN" \
+            https://slack.com/api/auth.test)
+          OK=$(echo "$AUTH" | jq -r .ok)
+          if [ "$OK" != "true" ]; then
+            ERR=$(echo "$AUTH" | jq -r .error)
+            echo "::error::Slack auth.test failed: $ERR"
+            exit 1
+          fi
+          echo "Slack auth ok: team $(echo "$AUTH" | jq -r .team), bot $(echo "$AUTH" | jq -r .user)"
+
+      - name: Run market scan
         env:
           SLACK_BOT_TOKEN: ${{ secrets.SLACK_BOT_TOKEN }}
           SLACK_CHANNEL_ID: C0APAPQRTPC
-          DRY_RUN: ${{ github.event.inputs.dry_run || 'false' }}
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
           PITCHBOOK_MCP_SERVER_URL: ${{ secrets.PITCHBOOK_MCP_SERVER_URL }}
           PITCHBOOK_MCP_AUTH_TOKEN: ${{ secrets.PITCHBOOK_MCP_AUTH_TOKEN }}
