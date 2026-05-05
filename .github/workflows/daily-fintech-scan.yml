@@ -1,9 +1,17 @@
 name: Daily Fintech Market Scan
 
+# Multiple cron fires per day act as redundancy against GitHub Actions
+# scheduling unreliability — at least one is virtually guaranteed to run.
+# daily_fintech_scan.py dedupes posts via Slack channel history, so
+# repeated runs on the same day post nothing duplicate.
+
 on:
   schedule:
-    # 13:00 UTC = 9:00 AM EDT / 8:00 AM EST — runs every day
-    - cron: '0 13 * * *'
+    - cron: '7 13 * * *'   # 13:07 UTC = 09:07 EDT / 08:07 EST
+    - cron: '7 15 * * *'   # 15:07 UTC = 11:07 EDT / 10:07 EST
+    - cron: '7 17 * * *'   # 17:07 UTC = 13:07 EDT / 12:07 EST
+    - cron: '7 19 * * *'   # 19:07 UTC = 15:07 EDT / 14:07 EST
+    - cron: '7 21 * * *'   # 21:07 UTC = 17:07 EDT / 16:07 EST
   workflow_dispatch:
     inputs:
       dry_run:
@@ -13,18 +21,22 @@ on:
         type: choice
         options: ['false', 'true']
 
+concurrency:
+  group: daily-fintech-scan
+  cancel-in-progress: false
+
 # Required secrets:
 #   SLACK_BOT_TOKEN          — Slack bot token for Julia's App (xoxb-...)
-#   ANTHROPIC_API_KEY        — Anthropic API key (enables Pitchbook news fetch)
 #
 # Optional secrets (enable live Pitchbook data via MCP):
-#   PITCHBOOK_MCP_SERVER_URL — Pitchbook MCP server URL (from your Claude.ai integration settings)
-#   PITCHBOOK_MCP_AUTH_TOKEN — Auth token for the Pitchbook MCP server (if required)
+#   ANTHROPIC_API_KEY        — Anthropic API key
+#   PITCHBOOK_MCP_SERVER_URL — Pitchbook MCP server URL
+#   PITCHBOOK_MCP_AUTH_TOKEN — Auth token for the Pitchbook MCP server
 
 jobs:
   post-market-scan:
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 15
 
     steps:
       - name: Checkout repository
