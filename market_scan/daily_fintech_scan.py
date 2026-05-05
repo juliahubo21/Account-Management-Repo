@@ -23,11 +23,13 @@ SLACK_BOT_TOKEN = os.environ["SLACK_BOT_TOKEN"]
 SLACK_CHANNEL_ID = os.environ.get("SLACK_CHANNEL_ID", "C0APAPQRTPC")
 DRY_RUN = os.environ.get("DRY_RUN", "false").lower() == "true"
 
+ANTHROPIC_API_KEY = os.environ.get("ANTHROPIC_API_KEY", "")
+PITCHBOOK_MCP_SERVER_URL = os.environ.get("PITCHBOOK_MCP_SERVER_URL", "")
+PITCHBOOK_MCP_AUTH_TOKEN = os.environ.get("PITCHBOOK_MCP_AUTH_TOKEN", "")
+
 EST = pytz.timezone("America/New_York")
 NOW_UTC = datetime.now(timezone.utc)
 CUTOFF_UTC = NOW_UTC - timedelta(hours=24)
-
-_BROWSER_HEADERS = {"User-Agent": "Mozilla/5.0 (compatible; MotiveFintechBot/1.0)"}
 
 # ── Fintech Verticals ─────────────────────────────────────────────────────────
 
@@ -129,7 +131,6 @@ VERTICALS = [
 # Payments:         Visa, Mastercard, Stripe, Adyen, PayPal, Fiserv
 
 STRATEGICS: list[tuple[str, str]] = [
-    # (regex_pattern, display_name)
     (r"Bloomberg", "Bloomberg"),
     (r"Broadridge", "Broadridge"),
     (r"\bICE\b", "ICE"),
@@ -191,6 +192,58 @@ RSS_FEEDS = [
     {"name": "American Banker", "url": "https://www.americanbanker.com/feed"},
 ]
 
+# ── Pitchbook queries (run via Anthropic API + MCP) ───────────────────────────
+#
+# Each tuple: (natural-language query, Pitchbook collection list)
+# Collections: PITCHBOOK_NEWS | LEVERAGED_COMMENTARY_AND_DATA_NEWS | THIRD_PARTY_NEWS
+
+PITCHBOOK_QUERIES: list[tuple[str, list[str]]] = [
+    (
+        "Latest fintech news: payments, open banking, BNPL, cross-border payments, digital wallets in the past 24 hours",
+        ["PITCHBOOK_NEWS", "THIRD_PARTY_NEWS"],
+    ),
+    (
+        "Capital markets fintech news: trading technology, market structure, clearing, settlement, electronic trading in the past 24 hours",
+        ["PITCHBOOK_NEWS", "THIRD_PARTY_NEWS"],
+    ),
+    (
+        "Insurtech and insurance technology news: embedded insurance, MGA, parametric, claims tech in the past 24 hours",
+        ["PITCHBOOK_NEWS", "THIRD_PARTY_NEWS"],
+    ),
+    (
+        "Wealthtech, robo-advisors, asset management technology, private wealth platform news in the past 24 hours",
+        ["PITCHBOOK_NEWS", "THIRD_PARTY_NEWS"],
+    ),
+    (
+        "Fintech lending, credit technology, mortgage tech, SME lending, BNPL news in the past 24 hours",
+        ["PITCHBOOK_NEWS", "THIRD_PARTY_NEWS"],
+    ),
+    (
+        "Crypto, blockchain, digital assets, DeFi, stablecoin, tokenization, CBDC news in the past 24 hours",
+        ["PITCHBOOK_NEWS", "THIRD_PARTY_NEWS"],
+    ),
+    (
+        "Fintech data analytics, RegTech, compliance technology, alternative data, AI in finance news in the past 24 hours",
+        ["PITCHBOOK_NEWS", "THIRD_PARTY_NEWS"],
+    ),
+    (
+        # Strategic network: Capital Markets + Data & Analytics
+        "News about Bloomberg, Broadridge, Nasdaq, LSEG, ICE, S&P Global, Euronext, "
+        "Deutsche Boerse, DTCC, CME Group, CBOE, Tradeweb, BlackRock, FIS, "
+        "Moody's, MSCI, FactSet, Morningstar, Snowflake, AlphaSense in the past 24 hours",
+        ["PITCHBOOK_NEWS", "THIRD_PARTY_NEWS"],
+    ),
+    (
+        # Strategic network: Wealth + Insurance + Payments
+        "News about SEI, SS&C, Computershare, ABN AMRO, Amundi, Aegon, Transamerica, "
+        "Swiss Re, Guidewire, Duck Creek, Esure, "
+        "Visa, Mastercard, Stripe, Adyen, PayPal, Fiserv in the past 24 hours",
+        ["PITCHBOOK_NEWS", "THIRD_PARTY_NEWS"],
+    ),
+]
+
+
+# ── RSS helpers ─────────────────────────────────────────────────────────────────
 
 def _parse_entry_date(entry) -> datetime:
     for attr in ("published_parsed", "updated_parsed"):
@@ -204,7 +257,7 @@ def _parse_entry_date(entry) -> datetime:
                 return dateutil_parser.parse(raw).astimezone(timezone.utc)
             except Exception:
                 pass
-    return NOW_UTC  # Assume recent if no date found
+    return NOW_UTC
 
 
 def fetch_rss(feed: dict) -> list[dict]:
@@ -235,6 +288,100 @@ def fetch_rss(feed: dict) -> list[dict]:
             })
     except Exception as exc:
         log.warning("Feed '%s' failed: %s", feed["name"], exc)
+    return articles
+
+
+# ── Pitchbook via Anthropic API + MCP ───────────────────────────────────────────
+
+def _extract_markdown_links(text: str) -> list[tuple[str, str]]:
+    """Parse [Title](URL) pairs from a Pitchbook-formatted response."""
+    return re.findall(r"\[([^\[\]]+)\]\((https?://[^\)]+)\)", text)
+
+
+def pitchbook_fetch_news(seen_urls: set[str]) -> list[dict]:
+    """
+    Call the Anthropic API, optionally bridging to the Pitchbook MCP server,
+    to fetch today's fintech news.
+
+    Requires ANTHROPIC_API_KEY.
+    When PITCHBOOK_MCP_SERVER_URL is also set the Pitchbook tools are live;
+    otherwise the call still runs but without real-time Pitchbook data.
+    """
+    if not ANTHROPIC_API_KEY:
+        log.info("ANTHROPIC_API_KEY not set — skipping Pitchbook fetch")
+        return []
+
+    import anthropic  # lazy import so missing package only fails this step
+
+    client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
+    today = NOW_UTC.strftime("%Y-%m-%d")
+    yesterday = CUTOFF_UTC.strftime("%Y-%m-%d")
+
+    # Build MCP server config if server URL is provided
+    mcp_server: dict | None = None
+    use_mcp_beta = bool(PITCHBOOK_MCP_SERVER_URL)
+    if use_mcp_beta:
+        mcp_server = {"type": "url", "url": PITCHBOOK_MCP_SERVER_URL, "name": "pitchbook"}
+        if PITCHBOOK_MCP_AUTH_TOKEN:
+            mcp_server["authorization_token"] = PITCHBOOK_MCP_AUTH_TOKEN
+        log.info("Pitchbook MCP server configured: %s", PITCHBOOK_MCP_SERVER_URL)
+    else:
+        log.info("No PITCHBOOK_MCP_SERVER_URL — calling Anthropic API without live MCP")
+
+    articles: list[dict] = []
+    seen_pb_urls: set[str] = set()
+
+    for query, collections in PITCHBOOK_QUERIES:
+        prompt = (
+            f"Today is {today}.\n\n"
+            "Use the pitchbook_get_news_analysis tool to retrieve recent fintech news.\n"
+            f"Query: {query}\n"
+            f"Collections: {collections}\n"
+            f"min_date: {yesterday}\n"
+            f"max_date: {today}\n\n"
+            "After retrieving results, list every source article as:\n"
+            "Sources:\n"
+            "- [Exact Article Title](https://full-article-url)\n"
+        )
+
+        try:
+            if use_mcp_beta:
+                response = client.beta.messages.create(
+                    model="claude-sonnet-4-6",
+                    max_tokens=4000,
+                    messages=[{"role": "user", "content": prompt}],
+                    betas=["mcp-client-2025-04-04"],
+                    mcp_servers=[mcp_server],
+                )
+            else:
+                response = client.messages.create(
+                    model="claude-sonnet-4-6",
+                    max_tokens=4000,
+                    messages=[{"role": "user", "content": prompt}],
+                )
+
+            # Collect all text from the response (text blocks + tool result text)
+            full_text = ""
+            for block in response.content:
+                if hasattr(block, "text"):
+                    full_text += block.text + "\n"
+
+            for title, url in _extract_markdown_links(full_text):
+                if url in seen_urls or url in seen_pb_urls:
+                    continue
+                seen_pb_urls.add(url)
+                articles.append({
+                    "title": title,
+                    "url": url,
+                    "summary": "",
+                    "source": "Pitchbook",
+                    "date": NOW_UTC,
+                })
+
+        except Exception as exc:
+            log.warning("Pitchbook query failed (%s): %s", query[:60], exc)
+
+    log.info("Pitchbook: %d articles fetched across %d queries", len(articles), len(PITCHBOOK_QUERIES))
     return articles
 
 
@@ -299,6 +446,7 @@ def build_blocks(
     date_str: str,
     vertical_news: dict,
     strategic_articles: list,
+    pitchbook_active: bool,
 ) -> list[dict]:
     blocks: list[dict] = []
 
@@ -342,17 +490,19 @@ def build_blocks(
         })
 
     blocks.append({"type": "divider"})
+    source_line = (
+        "_Sources: Pitchbook · FinTech Global · PYMNTS · Finextra · Markets Media "
+        if pitchbook_active else
+        "_Sources: FinTech Global · PYMNTS · Finextra · Markets Media "
+    )
+    source_line += (
+        "· GlobeNewswire · Crunchbase · InsurTech News · The Trade News "
+        "· CoinDesk · Tearsheet · American Banker "
+        f"— past 24h as of {NOW_UTC.strftime('%H:%M UTC')}_"
+    )
     blocks.append({
         "type": "context",
-        "elements": [{
-            "type": "mrkdwn",
-            "text": (
-                "_Sources: FinTech Global · PYMNTS · Finextra · Markets Media "
-                "· GlobeNewswire · Crunchbase · InsurTech News · The Trade News "
-                "· CoinDesk · Tearsheet · American Banker "
-                f"— past 24h as of {NOW_UTC.strftime('%H:%M UTC')}_"
-            ),
-        }],
+        "elements": [{"type": "mrkdwn", "text": source_line}],
     })
     return blocks
 
@@ -385,22 +535,31 @@ def slack_post(blocks: list, fallback: str) -> None:
 # ── Main ──────────────────────────────────────────────────────────────────────
 
 def main() -> None:
-    log.info("Starting Daily Fintech Market Scan (dry_run=%s)", DRY_RUN)
+    log.info(
+        "Starting Daily Fintech Market Scan (dry_run=%s, pitchbook_mcp=%s)",
+        DRY_RUN,
+        bool(PITCHBOOK_MCP_SERVER_URL),
+    )
     now_est = NOW_UTC.astimezone(EST)
-    date_str = now_est.strftime("%-m/%-d/%Y")  # e.g. 5/5/2026
+    date_str = now_est.strftime("%-m/%-d/%Y")
 
     # Step 1: Read recent Slack posts for deduplication
     seen_urls = slack_get_recent_urls()
     log.info("Dedup set: %d URLs already posted in last 24h", len(seen_urls))
 
-    # Step 2: Fetch all RSS feeds
+    # Step 2: Fetch RSS feeds
     all_articles: list[dict] = []
     for feed in RSS_FEEDS:
         batch = fetch_rss(feed)
         log.info("  %-18s %d articles", feed["name"] + ":", len(batch))
         all_articles.extend(batch)
 
-    # Step 3: Deduplicate
+    # Step 3: Fetch Pitchbook news via Anthropic API + MCP
+    pb_articles = pitchbook_fetch_news(seen_urls)
+    all_articles.extend(pb_articles)
+    pitchbook_active = bool(pb_articles)
+
+    # Step 4: Deduplicate
     seen_in_batch: set[str] = set()
     fresh: list[dict] = []
     for a in all_articles:
@@ -409,7 +568,7 @@ def main() -> None:
             fresh.append(a)
     log.info("Fresh articles: %d / %d total", len(fresh), len(all_articles))
 
-    # Step 4: Classify into verticals and flag strategics
+    # Step 5: Classify into verticals and flag strategics
     vertical_news: dict[str, list] = {v["name"]: [] for v in VERTICALS}
     strategic_articles: list[tuple] = []
 
@@ -433,8 +592,8 @@ def main() -> None:
         log.info("No new articles to post — skipping today's digest")
         return
 
-    # Step 5: Build and post
-    blocks = build_blocks(date_str, vertical_news, strategic_articles)
+    # Step 6: Build and post
+    blocks = build_blocks(date_str, vertical_news, strategic_articles, pitchbook_active)
     fallback = f"\U0001f5de️ Daily Fintech Market Scan — {date_str}"
     slack_post(blocks, fallback)
     log.info("Done.")

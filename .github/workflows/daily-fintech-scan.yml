@@ -13,6 +13,14 @@ on:
         type: choice
         options: ['false', 'true']
 
+# Required secrets:
+#   SLACK_BOT_TOKEN          — Slack bot token for Julia's App (xoxb-...)
+#   ANTHROPIC_API_KEY        — Anthropic API key (enables Pitchbook news fetch)
+#
+# Optional secrets (enable live Pitchbook data via MCP):
+#   PITCHBOOK_MCP_SERVER_URL — Pitchbook MCP server URL (from your Claude.ai integration settings)
+#   PITCHBOOK_MCP_AUTH_TOKEN — Auth token for the Pitchbook MCP server (if required)
+
 jobs:
   post-market-scan:
     runs-on: ubuntu-latest
@@ -28,11 +36,14 @@ jobs:
           python-version: '3.11'
 
       - name: Install dependencies
-        run: pip install requests feedparser beautifulsoup4 python-dateutil pytz
+        run: pip install requests feedparser beautifulsoup4 python-dateutil pytz anthropic
 
       - name: Run market scan and post to Slack
         env:
           SLACK_BOT_TOKEN: ${{ secrets.SLACK_BOT_TOKEN }}
           SLACK_CHANNEL_ID: C0APAPQRTPC
           DRY_RUN: ${{ github.event.inputs.dry_run || 'false' }}
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          PITCHBOOK_MCP_SERVER_URL: ${{ secrets.PITCHBOOK_MCP_SERVER_URL }}
+          PITCHBOOK_MCP_AUTH_TOKEN: ${{ secrets.PITCHBOOK_MCP_AUTH_TOKEN }}
         run: python market_scan/daily_fintech_scan.py
