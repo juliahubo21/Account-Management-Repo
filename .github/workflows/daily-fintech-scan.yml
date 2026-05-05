@@ -1,0 +1,38 @@
+name: Daily Fintech Market Scan
+
+on:
+  schedule:
+    # 13:00 UTC = 9:00 AM EDT / 8:00 AM EST — runs every day
+    - cron: '0 13 * * *'
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: 'Dry run — print message without posting to Slack'
+        required: false
+        default: 'false'
+        type: choice
+        options: ['false', 'true']
+
+jobs:
+  post-market-scan:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        run: pip install requests feedparser beautifulsoup4 python-dateutil pytz
+
+      - name: Run market scan and post to Slack
+        env:
+          SLACK_BOT_TOKEN: ${{ secrets.SLACK_BOT_TOKEN }}
+          SLACK_CHANNEL_ID: C0APAPQRTPC
+          DRY_RUN: ${{ github.event.inputs.dry_run || 'false' }}
+        run: python market_scan/daily_fintech_scan.py
