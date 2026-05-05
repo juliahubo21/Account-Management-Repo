@@ -21,10 +21,6 @@ on:
         type: choice
         options: ['false', 'true']
 
-concurrency:
-  group: daily-fintech-scan
-  cancel-in-progress: false
-
 # Required secrets:
 #   SLACK_BOT_TOKEN          — Slack bot token for Julia's App (xoxb-...)
 #
