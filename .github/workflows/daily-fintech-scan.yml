@@ -1,17 +1,12 @@
 name: Daily Fintech Market Scan
 
-# Multiple cron fires per day act as redundancy against GitHub Actions
-# scheduling unreliability — at least one is virtually guaranteed to run.
-# daily_fintech_scan.py dedupes posts via Slack channel history, so
-# repeated runs on the same day post nothing duplicate.
+# Single daily cron at 13:23 UTC (09:23 EDT / 08:23 EST).
+# daily_fintech_scan.py dedupes posts via Slack channel history (last 7 days),
+# normalizing URLs and titles to prevent the same article from posting twice.
 
 on:
   schedule:
     - cron: '23 13 * * *'  # 13:23 UTC = 09:23 EDT / 08:23 EST
-    - cron: '23 15 * * *'  # 15:23 UTC = 11:23 EDT / 10:23 EST
-    - cron: '23 17 * * *'  # 17:23 UTC = 13:23 EDT / 12:23 EST
-    - cron: '23 19 * * *'  # 19:23 UTC = 15:23 EDT / 14:23 EST
-    - cron: '23 21 * * *'  # 21:23 UTC = 17:23 EDT / 16:23 EST
   workflow_dispatch:
 
 concurrency:
